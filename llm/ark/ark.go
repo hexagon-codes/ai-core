@@ -30,6 +30,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
@@ -288,7 +289,7 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 
 	payload := map[string]any{
 		"model":    model,
-		"messages": convertMessages(req.Messages),
+		"messages": openai.ConvertMessages(req.Messages),
 		"stream":   stream,
 	}
 
@@ -317,22 +318,6 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	}
 
 	return json.Marshal(payload)
-}
-
-// convertMessages 转换消息格式
-func convertMessages(messages []llm.Message) []map[string]any {
-	result := make([]map[string]any, len(messages))
-	for i, msg := range messages {
-		m := map[string]any{
-			"role":    string(msg.Role),
-			"content": msg.Content,
-		}
-		if msg.Name != "" {
-			m["name"] = msg.Name
-		}
-		result[i] = m
-	}
-	return result
 }
 
 // 豆包 API 响应结构（兼容 OpenAI 格式）

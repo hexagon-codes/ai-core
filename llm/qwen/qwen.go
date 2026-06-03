@@ -12,6 +12,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 	"github.com/hexagon-codes/toolkit/util/logger"
@@ -289,7 +290,7 @@ func (p *Provider) setHeaders(req *http.Request) {
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, error) {
 	payload := map[string]any{
 		"model":    req.Model,
-		"messages": convertMessages(req.Messages),
+		"messages": openai.ConvertMessages(req.Messages),
 		"stream":   stream,
 	}
 
@@ -325,22 +326,6 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	}
 
 	return json.Marshal(payload)
-}
-
-// convertMessages 转换消息格式
-func convertMessages(messages []llm.Message) []map[string]any {
-	result := make([]map[string]any, len(messages))
-	for i, msg := range messages {
-		m := map[string]any{
-			"role":    string(msg.Role),
-			"content": msg.Content,
-		}
-		if msg.Name != "" {
-			m["name"] = msg.Name
-		}
-		result[i] = m
-	}
-	return result
 }
 
 // 通义千问 API 响应结构（兼容 OpenAI 格式）

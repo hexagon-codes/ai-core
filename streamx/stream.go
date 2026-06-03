@@ -76,6 +76,10 @@ type Chunk struct {
 // ToolCall 表示模型发起的工具/函数调用
 // 在 Function Calling 场景中，模型可能请求调用外部工具
 type ToolCall struct {
+	// Index 流式响应中 tool_call 的位置索引（OpenAI 协议标准合并键）
+	// OpenAI streaming 规范：仅首个 delta 携带 id/name/type，后续 delta 仅含 arguments 增量，
+	// 必须按 Index 合并 delta；Claude/DeepSeek-R1/Qwen3 等会把 arguments 切成多个 delta。
+	Index int `json:"index"`
 	// ID 工具调用的唯一标识符
 	// 用于在后续响应中匹配工具调用结果
 	ID string `json:"id,omitempty"`
@@ -526,31 +530,36 @@ func (s *Stream) sendErrorWithCallback(err error, onError func(error)) {
 }
 
 // mergeToolCalls 合并工具调用列表
-// 流式响应中，同一个工具调用的参数可能分散在多个块中
-// 此函数根据 ID 匹配并合并参数字符串
+//
+// OpenAI streaming 协议规定（也被 OpenRouter / new-api / one-api 等兼容网关沿用）：
+//   - 首个 tool_call delta 携带 index + id + type + function.name + function.arguments(可为空)
+//   - 后续 delta 仅携带 index + function.arguments 增量片段，id/name/type 均为空
+//   - 多个并行 tool_call 用不同的 index 区分
+//
+// 因此**合并键必须是 Index 而不是 ID**。按 ID 合并的旧实现遇到 Claude / DeepSeek-R1 /
+// Qwen3 这类按 token 切片 streaming 的模型必出"空 name 工具调用"，畸形请求回灌
+// 二轮 prompt 被网关拒收（参考 BUG-20260520）。
 func mergeToolCalls(existing, new []ToolCall) []ToolCall {
 	if len(new) == 0 {
 		return existing
 	}
 
-	// 遍历新的工具调用，按 ID 匹配合并或追加
 	for _, tc := range new {
 		found := false
-		// 只有当 ID 非空时才尝试匹配合并
-		if tc.ID != "" {
-			for i, etc := range existing {
-				if etc.ID == tc.ID {
-					// 合并参数
-					existing[i].Arguments += tc.Arguments
-					if tc.Name != "" {
-						existing[i].Name = tc.Name
-					}
-					if tc.Type != "" {
-						existing[i].Type = tc.Type
-					}
-					found = true
-					break
+		for i := range existing {
+			if existing[i].Index == tc.Index {
+				existing[i].Arguments += tc.Arguments
+				if tc.ID != "" {
+					existing[i].ID = tc.ID
 				}
+				if tc.Name != "" {
+					existing[i].Name = tc.Name
+				}
+				if tc.Type != "" {
+					existing[i].Type = tc.Type
+				}
+				found = true
+				break
 			}
 		}
 		if !found {

@@ -329,8 +329,27 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	return json.Marshal(payload)
 }
 
-// convertMessages 转换消息格式
+// convertMessages 兼容内部老调用点，转发到 ConvertMessages。
 func convertMessages(messages []llm.Message) []map[string]any {
+	return ConvertMessages(messages)
+}
+
+// ConvertMessages 将 llm.Message 序列为 OpenAI Chat Completions 兼容的 messages 数组。
+//
+// 实现严格遵循 OpenAI / OpenAI 兼容网关（OpenRouter / new-api / one-api 等）的协议：
+//   - 多模态 MultiContent → content 数组（text / image_url parts）
+//   - assistant + ToolCalls → 输出 tool_calls 数组；Content 为空时 content 设为 JSON null
+//   - role=tool + ToolCallID → 输出 tool_call_id 关联原调用
+//
+// 所有 OpenAI 兼容的下游 provider（qwen / ollama / ark / deepseek 等）都应调用此函数，
+// 避免各自实现私有 convertMessages 时漏写关键字段（BUG-20260520）。
+//
+// BUG-20260523 加固：在序列化前先 SanitizeToolCallSequence 剥离孤立 tool message，
+// 防止上游 Anthropic 校验 "Each tool_result block must have a corresponding tool_use
+// block in the previous message" 失败。任何 source（持久化历史 / 网关翻译错位 /
+// 中间层 race）导致的不一致都自愈，永远输出契约级合规的序列。
+func ConvertMessages(messages []llm.Message) []map[string]any {
+	messages = SanitizeToolCallSequence(messages)
 	result := make([]map[string]any, len(messages))
 	for i, msg := range messages {
 		m := map[string]any{
@@ -364,6 +383,36 @@ func convertMessages(messages []llm.Message) []map[string]any {
 			m["content"] = contentParts
 		} else {
 			m["content"] = msg.Content
+		}
+
+		// assistant + tool_calls：必须输出 tool_calls 数组。
+		//
+		// BUG-20260523-v4：content **强制设为 nil**（不再仅 "" 时设 nil）。
+		// 部分 OpenAI 兼容网关在翻 Anthropic 时遇到
+		// `{role:assistant, content:"text", tool_calls:[...]}` 共存场景，
+		// 只翻 text 丢 tool_use → 下一条 tool_result 找不到对应 tool_use → 400。
+		// 强制 content=nil 后网关只看 tool_calls，翻译路径单一不易踩 bug。
+		// trade-off：丢失 LLM 的 reasoning text 这一段（如 "我来帮你..."），
+		// 但下一轮 LLM 仍能从 tool_calls 推断意图，业务无损。
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
+			calls := make([]map[string]any, len(msg.ToolCalls))
+			for j, tc := range msg.ToolCalls {
+				calls[j] = map[string]any{
+					"id":   tc.ID,
+					"type": "function",
+					"function": map[string]any{
+						"name":      tc.Name,
+						"arguments": tc.Arguments,
+					},
+				}
+			}
+			m["tool_calls"] = calls
+			m["content"] = nil
+		}
+
+		// role=tool：必须带 tool_call_id 关联回原调用，否则下游网关无法构造 tool_result。
+		if msg.Role == llm.RoleTool && msg.ToolCallID != "" {
+			m["tool_call_id"] = msg.ToolCallID
 		}
 
 		if msg.Name != "" {
@@ -436,3 +485,58 @@ func (p *Provider) parseResponse(resp *openAIResponse) *llm.CompletionResponse {
 // 确保实现了 Provider 接口
 // EmbeddingProvider 接口验证在 embedding.go 中
 var _ llm.Provider = (*Provider)(nil)
+
+// SanitizeToolCallSequence 剥离孤立 tool/tool_result message（BUG-20260523）。
+//
+// 上游 Anthropic 严格校验：
+//
+//	Each `tool_result` block must have a corresponding `tool_use` block
+//	in the previous message.
+//
+// 任何导致 tool message 的 ToolCallID 在前面 assistant.ToolCalls 找不到对应 ID
+// 的场景都会触发 400：
+//   - session 历史持久化时 ToolCalls 字段漏存，下次加载只剩 tool message
+//   - 网关在 OpenAI ↔ Anthropic 翻译时 race / 异常丢失 assistant tool_use
+//   - 上下文压缩误剥离 assistant tool_call message
+//   - 多 provider failover 切换后老 turn 的 tool message 还在缓冲
+//
+// 自愈契约：
+//   - 维护"当前可见 tool_call_id 集合"，每见到 assistant.ToolCalls 时**累加** ID
+//   - 每条 tool message 的 ToolCallID 必须在集合内，否则**丢弃**
+//   - assistant message 自身（含 ToolCalls）无条件保留——它是 producer
+//   - user/system message 不重置集合（同会话内 tool_use ID 跨多轮仍可被引用，
+//     但通常 tool_result 紧跟 tool_use，安全）
+//
+// 该函数纯函数无副作用，不改原 slice；测试 + 上线长期守护契约。
+func SanitizeToolCallSequence(messages []llm.Message) []llm.Message {
+	if len(messages) == 0 {
+		return messages
+	}
+	known := make(map[string]struct{})
+	out := make([]llm.Message, 0, len(messages))
+	for _, m := range messages {
+		if m.Role == llm.RoleAssistant && len(m.ToolCalls) > 0 {
+			for _, tc := range m.ToolCalls {
+				if tc.ID != "" {
+					known[tc.ID] = struct{}{}
+				}
+			}
+			out = append(out, m)
+			continue
+		}
+		if m.Role == llm.RoleTool {
+			if m.ToolCallID == "" {
+				// 没 ID 也无法对账 → 丢
+				continue
+			}
+			if _, ok := known[m.ToolCallID]; !ok {
+				// 孤立 tool → 丢，避免上游 400
+				continue
+			}
+			out = append(out, m)
+			continue
+		}
+		out = append(out, m)
+	}
+	return out
+}

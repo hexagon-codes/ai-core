@@ -75,8 +75,11 @@ func (p *OpenAIParser) Parse(data []byte) (*Chunk, error) {
 		}
 
 		// 处理工具调用
+		// OpenAI streaming 规范：仅首个 delta 携带完整 id/name/type，后续 delta 仅含 arguments 增量，
+		// 用 Index 作为合并键（不是 ID），见 mergeToolCalls。
 		for _, tc := range choice.Delta.ToolCalls {
 			chunk.ToolCalls = append(chunk.ToolCalls, ToolCall{
+				Index:     tc.Index,
 				ID:        tc.ID,
 				Type:      tc.Type,
 				Name:      tc.Function.Name,

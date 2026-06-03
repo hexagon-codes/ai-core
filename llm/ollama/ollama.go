@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
@@ -295,17 +296,9 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 
 // buildRequestBody 构建请求体
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, error) {
-	messages := make([]map[string]any, len(req.Messages))
-	for i, msg := range req.Messages {
-		messages[i] = map[string]any{
-			"role":    string(msg.Role),
-			"content": msg.Content,
-		}
-	}
-
 	payload := map[string]any{
 		"model":    req.Model,
-		"messages": messages,
+		"messages": openai.ConvertMessages(req.Messages),
 		"stream":   stream,
 	}
 	if think, ok := ollamaThinkFromMetadata(req.Metadata); ok {
