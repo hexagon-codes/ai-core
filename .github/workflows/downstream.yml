@@ -22,7 +22,7 @@ jobs:
       - uses: actions/checkout@v4
         with: { repository: hexagon-codes/hexclaw, path: hexclaw }
       - uses: actions/setup-go@v5
-        with: { go-version: '1.25.5' }
+        with: { go-version: '1.25.x' }
       - name: go.work（下游用本 PR 的 ai-core）
         run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
       - name: hexagon build + test
