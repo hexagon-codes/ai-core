@@ -1,0 +1,31 @@
+name: Downstream Contract
+
+# 接缝契约门禁：本仓（ai-core）任何改动，必须让其全部直接消费者（hexagon 框架 +
+# hexclaw 应用）在 go.work 下 build+test 仍全绿。捕获对共享底座接口的破坏式变更。
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  downstream:
+    name: hexagon + hexclaw against this ai-core
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { path: ai-core }
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/toolkit, path: toolkit }
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/hexagon, path: hexagon }
+      - uses: actions/checkout@v4
+        with: { repository: hexagon-codes/hexclaw, path: hexclaw }
+      - uses: actions/setup-go@v5
+        with: { go-version: '1.25.5' }
+      - name: go.work（下游用本 PR 的 ai-core）
+        run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
+      - name: hexagon build + test
+        run: (cd hexagon && go build ./... && go test ./...)
+      - name: hexclaw build + test
+        run: (cd hexclaw && go build ./... && go test ./...)
