@@ -28,6 +28,9 @@ const (
 	defaultModel   = "ernie-4.0-8k"
 )
 
+// 编译期接口断言：*Provider 满足 llm.Provider 契约。
+var _ llm.Provider = (*Provider)(nil)
+
 // Provider 百度文心一言 Provider
 type Provider struct {
 	apiKey      string

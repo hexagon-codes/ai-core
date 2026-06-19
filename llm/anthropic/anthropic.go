@@ -314,8 +314,12 @@ type anthropicResponse struct {
 	StopReason   string             `json:"stop_reason"`
 	StopSequence string             `json:"stop_sequence"`
 	Usage        struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens int `json:"input_tokens"`
+		// CacheCreationInputTokens 写入提示词缓存所消耗的输入 Token
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		// CacheReadInputTokens 命中提示词缓存、从缓存读取的输入 Token
+		CacheReadInputTokens int `json:"cache_read_input_tokens"`
+		OutputTokens         int `json:"output_tokens"`
 	} `json:"usage"`
 }
 
@@ -336,7 +340,10 @@ func (p *Provider) parseResponse(resp *anthropicResponse, _ string) *llm.Complet
 		Usage: llm.Usage{
 			PromptTokens:     resp.Usage.InputTokens,
 			CompletionTokens: resp.Usage.OutputTokens,
-			TotalTokens:      resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			// TotalTokens 保持"非缓存输入+输出"语义不变，缓存维度独立记录
+			TotalTokens:         resp.Usage.InputTokens + resp.Usage.OutputTokens,
+			CacheCreationTokens: resp.Usage.CacheCreationInputTokens,
+			CacheReadTokens:     resp.Usage.CacheReadInputTokens,
 		},
 	}
 

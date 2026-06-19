@@ -9,11 +9,14 @@ import (
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/tokenizer"
 	"github.com/hexagon-codes/toolkit/net/httpx"
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 const (
@@ -212,12 +215,30 @@ func (p *Provider) Models() []llm.ModelInfo {
 	}
 }
 
-// CountTokens 计算消息的 Token 数量（简化实现）
+// CountTokens 计算消息的 Token 数量
+//
+// 使用 tokenizer 的 Gemini 计数器进行混合策略估算，相比旧的 len/4 整数除法
+// 不会把短内容截断为 0，并且会计入多模态文本与工具调用参数（W3-54）。
 func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
-	// 简化估算：约 4 字符一个 token
+	counter := tokenizer.New(tokenizer.Gemini)
+
 	var total int
 	for _, msg := range messages {
-		total += len(msg.Content) / 4
+		// 纯文本内容
+		total += counter.Count(msg.Content)
+
+		// 多模态内容中的文本部分（图片不计入文本 token）
+		for _, part := range msg.MultiContent {
+			if part.Type == "text" || (part.Type != "image_url" && part.Text != "") {
+				total += counter.Count(part.Text)
+			}
+		}
+
+		// 工具调用请求的参数（assistant 发起的 functionCall）
+		for _, tc := range msg.ToolCalls {
+			total += counter.Count(tc.Name)
+			total += counter.Count(tc.Arguments)
+		}
 	}
 	return total, nil
 }
@@ -237,11 +258,20 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest) ([]byte, error) {
 			continue
 		}
 
-		content := geminiContent{
-			Role:  convertRole(msg.Role),
-			Parts: []geminiPart{{Text: msg.Content}},
+		// 工具结果消息：Gemini 没有独立 "tool" 角色，需转换为携带
+		// functionResponse part 的 user content，否则工具语义丢失（W3-53）。
+		if msg.Role == llm.RoleTool {
+			contents = append(contents, geminiContent{
+				Role:  convertRole(msg.Role),
+				Parts: []geminiPart{{FunctionResponse: buildFunctionResponse(msg)}},
+			})
+			continue
 		}
-		contents = append(contents, content)
+
+		contents = append(contents, geminiContent{
+			Role:  convertRole(msg.Role),
+			Parts: buildParts(msg),
+		})
 	}
 
 	payload := map[string]any{
@@ -306,6 +336,13 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest) ([]byte, error) {
 }
 
 // convertRole 转换角色名称
+//
+// Gemini 仅支持 "user" 与 "model" 两种 content 角色：
+//   - RoleAssistant → "model"
+//   - RoleUser / RoleTool / 其他 → "user"
+//
+// 注意：RoleTool 虽映射为 "user"，但其 part 必须是 functionResponse
+// 而非普通文本（见 buildRequestBody），以保留工具结果语义。
 func convertRole(role llm.Role) string {
 	switch role {
 	case llm.RoleUser:
@@ -317,6 +354,73 @@ func convertRole(role llm.Role) string {
 	}
 }
 
+// buildParts 将一条消息转换为 Gemini parts 列表。
+//
+// 优先处理多模态内容（msg.MultiContent）：
+//   - 文本 part → {text}
+//   - base64 data URI 图片 → {inlineData:{mimeType,data}}
+//   - http(s) URL 图片 → {fileData:{fileUri}}
+//
+// 当无多模态内容时，回退到纯文本 msg.Content（W3-52）。
+func buildParts(msg llm.Message) []geminiPart {
+	if !msg.HasMultiContent() {
+		return []geminiPart{{Text: msg.Content}}
+	}
+
+	parts := make([]geminiPart, 0, len(msg.MultiContent))
+	for _, part := range msg.MultiContent {
+		switch part.Type {
+		case "image_url":
+			if part.ImageURL == nil {
+				continue
+			}
+			parts = append(parts, buildImagePart(part.ImageURL.URL))
+		default:
+			// 默认按文本处理（含显式 "text" 类型）
+			parts = append(parts, geminiPart{Text: part.Text})
+		}
+	}
+	return parts
+}
+
+// buildImagePart 根据图片 URL 形态选择 Gemini 的承载方式：
+//   - base64 data URI（"data:image/png;base64,..."）→ inlineData
+//   - 普通 http(s) URL → fileData
+func buildImagePart(url string) geminiPart {
+	if mimeType, data, ok := parseDataURI(url); ok {
+		return geminiPart{InlineData: &geminiInlineData{MimeType: mimeType, Data: data}}
+	}
+	return geminiPart{FileData: &geminiFileData{FileURI: url}}
+}
+
+// parseDataURI 解析 base64 data URI，返回 mimeType 与裸 base64 负载。
+// 形如 "data:image/png;base64,iVBORw0KGgo="；非该形态时返回 ok=false。
+func parseDataURI(url string) (mimeType, data string, ok bool) {
+	if !strings.HasPrefix(url, "data:") {
+		return "", "", false
+	}
+	// 去除 "data:" 前缀后按 "," 分割元信息与负载
+	meta, payload, found := strings.Cut(url[len("data:"):], ",")
+	if !found {
+		return "", "", false
+	}
+	// meta 形如 "image/png;base64"，取 ";base64" 之前部分作为 mimeType
+	mimeType, _, _ = strings.Cut(meta, ";")
+	return mimeType, payload, true
+}
+
+// buildFunctionResponse 将工具结果消息转换为 Gemini 的 functionResponse。
+//
+// Gemini 要求 functionResponse 含函数名与结构化 response 对象：
+//   - name 取自 msg.ToolCallID（关联到此前的工具调用）
+//   - response 将工具返回内容包装为 {"content": <内容>} 对象
+func buildFunctionResponse(msg llm.Message) *geminiFunctionResponse {
+	return &geminiFunctionResponse{
+		Name:     msg.ToolCallID,
+		Response: map[string]any{"content": msg.Content},
+	}
+}
+
 // Gemini 数据结构
 type geminiContent struct {
 	Role  string       `json:"role,omitempty"`
@@ -324,13 +428,43 @@ type geminiContent struct {
 }
 
 type geminiPart struct {
-	Text         string              `json:"text,omitempty"`
-	FunctionCall *geminiFunctionCall `json:"functionCall,omitempty"`
+	Text             string                  `json:"text,omitempty"`
+	InlineData       *geminiInlineData       `json:"inlineData,omitempty"`
+	FileData         *geminiFileData         `json:"fileData,omitempty"`
+	FunctionCall     *geminiFunctionCall     `json:"functionCall,omitempty"`
+	FunctionResponse *geminiFunctionResponse `json:"functionResponse,omitempty"`
+}
+
+// geminiInlineData 承载内联（base64）二进制数据，用于 Vision 等多模态请求。
+// 对应 OpenAI 的 base64 data URI 图片。
+type geminiInlineData struct {
+	// MimeType 媒体类型，如 "image/png"、"image/jpeg"
+	MimeType string `json:"mimeType"`
+	// Data base64 编码的负载（不含 data URI 前缀）
+	Data string `json:"data"`
+}
+
+// geminiFileData 承载通过 URI 引用的远程文件，用于 http(s) 图片地址。
+type geminiFileData struct {
+	// MimeType 媒体类型，可为空（由 Gemini 服务端推断）
+	MimeType string `json:"mimeType,omitempty"`
+	// FileURI 文件的 http(s) 地址
+	FileURI string `json:"fileUri"`
 }
 
 type geminiFunctionCall struct {
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`
+}
+
+// geminiFunctionResponse 承载工具调用结果，回传给模型。
+// Gemini 没有独立的 "tool" 角色，工具结果以 functionResponse part
+// 放入 role="user" 的 content 中回传。
+type geminiFunctionResponse struct {
+	// Name 关联的函数名
+	Name string `json:"name"`
+	// Response 工具返回内容，包装为对象（Gemini 要求 response 为结构化对象）
+	Response map[string]any `json:"response"`
 }
 
 // Gemini API 响应结构
@@ -354,9 +488,14 @@ type geminiResponse struct {
 }
 
 // parseResponse 解析响应
+//
+// Gemini 的 generateContent API 不返回 id 与 created 字段，因此本地生成
+// 响应 ID 并以当前时间戳填充 Created，避免关键字段恒为零值（W3-55）。
 func (p *Provider) parseResponse(resp *geminiResponse, model string) *llm.CompletionResponse {
 	result := &llm.CompletionResponse{
-		Model: model,
+		ID:      "gemini-" + idgen.NanoID(),
+		Model:   model,
+		Created: time.Now().Unix(),
 		Usage: llm.Usage{
 			PromptTokens:     resp.UsageMetadata.PromptTokenCount,
 			CompletionTokens: resp.UsageMetadata.CandidatesTokenCount,

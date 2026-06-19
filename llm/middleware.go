@@ -12,8 +12,8 @@ import (
 	"time"
 
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/toolkit/lang/syncx"
 	"github.com/hexagon-codes/toolkit/util/retry"
-	"golang.org/x/sync/singleflight"
 )
 
 // isRetryableError 判断错误是否值得重试
@@ -395,7 +395,9 @@ type cacheProvider struct {
 	inner Provider
 	cache Cache
 	keyFn CacheKeyFunc
-	sf    singleflight.Group
+	// sf 复用 toolkit/lang/syncx.Singleflight 去重并发缓存未命中请求，
+	// 零值即可使用（内部懒加载 map），语义与 golang.org/x/sync/singleflight 等价。
+	sf syncx.Singleflight
 }
 
 func (p *cacheProvider) Name() string { return p.inner.Name() }
@@ -422,7 +424,7 @@ func (p *cacheProvider) Complete(ctx context.Context, req CompletionRequest) (*C
 
 	// Use singleflight to deduplicate concurrent cache-miss requests
 	// with the same key, preventing thundering herd on the backend.
-	v, err, _ := p.sf.Do(key, func() (any, error) {
+	v, err := p.sf.Do(key, func() (any, error) {
 		// Double-check cache inside singleflight in case another
 		// goroutine populated it between our first check and entering Do.
 		if cached, err := p.cache.Get(ctx, key); err == nil && cached != nil {

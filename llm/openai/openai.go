@@ -448,6 +448,10 @@ type openAIResponse struct {
 		PromptTokens     int `json:"prompt_tokens"`
 		CompletionTokens int `json:"completion_tokens"`
 		TotalTokens      int `json:"total_tokens"`
+		// PromptTokensDetails 输入 Token 的细分，含命中提示词缓存的 Token 数
+		PromptTokensDetails struct {
+			CachedTokens int `json:"cached_tokens"`
+		} `json:"prompt_tokens_details"`
 	} `json:"usage"`
 }
 
@@ -461,6 +465,8 @@ func (p *Provider) parseResponse(resp *openAIResponse) *llm.CompletionResponse {
 			PromptTokens:     resp.Usage.PromptTokens,
 			CompletionTokens: resp.Usage.CompletionTokens,
 			TotalTokens:      resp.Usage.TotalTokens,
+			// OpenAI 仅报告缓存读取（cached_tokens），无缓存写入概念
+			CacheReadTokens: resp.Usage.PromptTokensDetails.CachedTokens,
 		},
 	}
 

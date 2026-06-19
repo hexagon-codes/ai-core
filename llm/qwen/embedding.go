@@ -100,6 +100,13 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 		return nil, fmt.Errorf("解析 embedding 响应失败: %w", err)
 	}
 
+	// 校验返回向量数与输入 texts 数一致
+	// 调用方依赖向量与文本一一对应（embeddings[i] 对应 texts[i]），
+	// 若数量不等则一一对应假设被破坏，必须显式报错而非静默返回错位结果。
+	if len(result.Data) != len(texts) {
+		return nil, fmt.Errorf("qwen embedding 响应向量数(%d)与输入 texts 数(%d)不一致", len(result.Data), len(texts))
+	}
+
 	// 按 index 排序确保顺序正确
 	sort.Slice(result.Data, func(i, j int) bool {
 		return result.Data[i].Index < result.Data[j].Index
