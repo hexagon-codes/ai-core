@@ -117,11 +117,17 @@ type claudeEvent struct {
 	ContentBlock *struct {
 		Type string `json:"type"`
 		Text string `json:"text,omitempty"`
+		// tool_use 块携带工具调用的 id 与 name（input 初始为空，参数经
+		// 后续 input_json_delta 增量流式传输）
+		ID   string `json:"id,omitempty"`
+		Name string `json:"name,omitempty"`
 	} `json:"content_block,omitempty"`
 	Delta *struct {
 		Type       string `json:"type,omitempty"`
 		Text       string `json:"text,omitempty"`
 		StopReason string `json:"stop_reason,omitempty"`
+		// PartialJSON 是 input_json_delta 增量，拼接后构成工具调用参数 JSON
+		PartialJSON string `json:"partial_json,omitempty"`
 	} `json:"delta,omitempty"`
 	Usage *struct {
 		InputTokens  int `json:"input_tokens"`
@@ -161,9 +167,30 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 			chunk.Model = evt.Message.Model
 		}
 
+	case "content_block_start":
+		// 工具调用块起始：携带 id 与 name，参数随后由 input_json_delta 流式传入。
+		// 文本块的 content_block_start 无增量内容，忽略即可。
+		if evt.ContentBlock != nil && evt.ContentBlock.Type == "tool_use" {
+			chunk.ToolCalls = []ToolCall{{
+				Index: evt.Index,
+				ID:    evt.ContentBlock.ID,
+				Type:  "function",
+				Name:  evt.ContentBlock.Name,
+			}}
+		}
+
 	case "content_block_delta":
 		if evt.Delta != nil {
-			chunk.Content = evt.Delta.Text
+			// input_json_delta 是工具参数增量；其余（text_delta 或未标注）为文本增量。
+			// 以 content block 的 index 作为合并键（见 ToolCall.Index 说明）。
+			if evt.Delta.Type == "input_json_delta" {
+				chunk.ToolCalls = []ToolCall{{
+					Index:     evt.Index,
+					Arguments: evt.Delta.PartialJSON,
+				}}
+			} else {
+				chunk.Content = evt.Delta.Text
+			}
 		}
 
 	case "message_delta":

@@ -100,7 +100,24 @@ type Usage struct {
 	// CompletionTokens 输出/生成内容消耗的 Token 数
 	CompletionTokens int `json:"completion_tokens,omitempty"`
 	// TotalTokens 总计消耗的 Token 数（输入+输出）
+	//
+	// 注意：为保持向后兼容，TotalTokens 仍为 PromptTokens+CompletionTokens，
+	// 不把缓存 Token 计入其中。缓存读/写 Token 由下面两个维度独立记录，
+	// 需要"真实提示词总量"的消费方可自行计算
+	// PromptTokens+CacheCreationTokens+CacheReadTokens。
 	TotalTokens int `json:"total_tokens,omitempty"`
+	// CacheCreationTokens 写入提示词缓存所消耗的 Token 数
+	//
+	// 对应 Anthropic 的 cache_creation_input_tokens。表示本次请求为建立
+	// 提示词缓存而额外计费的输入 Token（首次写入缓存时产生）。
+	// 不支持提示词缓存或本次未写缓存的 Provider 该值为 0。
+	CacheCreationTokens int `json:"cache_creation_tokens,omitempty"`
+	// CacheReadTokens 命中提示词缓存、从缓存读取的 Token 数
+	//
+	// 对应 Anthropic 的 cache_read_input_tokens、OpenAI 的
+	// prompt_tokens_details.cached_tokens。表示本次请求命中缓存、
+	// 以折扣价计费的输入 Token。未命中缓存时该值为 0。
+	CacheReadTokens int `json:"cache_read_tokens,omitempty"`
 }
 
 // Result 表示流式响应处理完成后的完整结果
@@ -408,6 +425,14 @@ func (s *Stream) Close() error {
 // processLoop 是后台处理的主循环
 // 持续从 reader 读取行，解析为 Chunk，发送到通道
 // 处理 SSE 格式的 "data:" 前缀
+//
+// 注意：本循环按「行」分帧——每个 "data:" 行独立解析为一个 chunk，不依赖 SSE
+// 空行事件边界。这与 toolkit/net/sse.Reader 的「空行分帧 + 多 data 行 \n 合并」
+// 语义不等价：部分上游/网关在相邻 chunk 间不插入空行（见 stream_bridge_test.go
+// 的 claudeSSEWithToolUse 夹具），sse.Reader 会把连续 data 行合并成单事件，导致
+// 多段 JSON 拼接后 Unmarshal 失败。因此即便 W10 已提供 sse.WithDoneFunc/
+// ReadUntilDone 解决了 Provider done 检测，事件分帧粒度差异仍未被覆盖，本路径
+// 保留本地行级实现（正确性优先，详见 sse_boundary_test.go 头注与该夹具）。
 func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError func(error)) {
 	defer close(s.chunks)
 	defer close(s.done)
