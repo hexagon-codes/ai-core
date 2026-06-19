@@ -2,13 +2,11 @@ package memory
 
 import (
 	"context"
-	"crypto/rand"
-	"encoding/hex"
 	"errors"
-	"fmt"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // ErrNotFound is returned when a memory entry does not exist.
@@ -62,6 +60,31 @@ type Entry struct {
 
 	// UpdatedAt 更新时间
 	UpdatedAt time.Time `json:"updated_at,omitempty"`
+
+	// ===== 溯源 (provenance / lineage) =====
+
+	// Version 条目修订版本，从 1 起递增；0 表示未版本化（向后兼容默认）。
+	// 当一条记忆被修正/取代时，新条目的 Version 在父版本上 +1（见 NewDerivedEntry）。
+	Version int `json:"version,omitempty"`
+
+	// ParentID 溯源父条目 ID：本条目由哪条派生或取代，沿 ParentID 可回溯 lineage 链。
+	ParentID string `json:"parent_id,omitempty"`
+
+	// CauseBy 产生本条目的动作/事件标识，例如 "tool:web_search"、"reflection"、
+	// "user_input"，用于回答"这条记忆从何而来"。
+	CauseBy string `json:"cause_by,omitempty"`
+
+	// Stale 标记本条目是否已过时/被取代。检索时可经 SearchQuery.ExcludeStale 过滤，
+	// 既保留历史可追溯，又能在上下文组装时只取有效记忆。
+	Stale bool `json:"stale,omitempty"`
+
+	// ===== 多模态 (multimodal) =====
+
+	// Modality 内容模态：空=纯文本（向后兼容），或 text/image/audio/video/multimodal。
+	Modality string `json:"modality,omitempty"`
+
+	// Media 非文本内容引用（图片/音频/视频等），与 Content 并存。
+	Media []MediaRef `json:"media,omitempty"`
 }
 
 // SearchQuery 定义搜索查询参数
@@ -90,6 +113,12 @@ type SearchQuery struct {
 	// Metadata 元数据过滤
 	Metadata map[string]any `json:"metadata,omitempty"`
 
+	// ExcludeStale 为 true 时过滤掉已标记 Stale 的条目，只返回有效记忆。
+	ExcludeStale bool `json:"exclude_stale,omitempty"`
+
+	// CauseBy 按产生动作/事件过滤（溯源查询），空则不过滤。
+	CauseBy string `json:"cause_by,omitempty"`
+
 	// OrderBy 排序字段
 	OrderBy string `json:"order_by,omitempty"`
 
@@ -113,6 +142,9 @@ type MemoryStats struct {
 }
 
 // ============== 缓冲记忆实现 ==============
+
+// 编译期接口断言：*BufferMemory 满足 Memory 契约。
+var _ Memory = (*BufferMemory)(nil)
 
 // BufferMemory 是一个简单的内存缓冲区实现
 // 使用 FIFO 策略，当超过容量时移除最旧的条目
@@ -150,14 +182,9 @@ func NewBuffer(capacity int, opts ...BufferOption) *BufferMemory {
 	return m
 }
 
-var idCounter atomic.Uint64
-
 func defaultIDGen() string {
-	// 使用原子计数器 + 随机数确保唯一性，避免时间戳冲突
-	counter := idCounter.Add(1)
-	randomBytes := make([]byte, 4)
-	_, _ = rand.Read(randomBytes)
-	return fmt.Sprintf("mem-%d-%s", counter, hex.EncodeToString(randomBytes))
+	// 复用 toolkit NanoID（URL 安全、抗碰撞），不自行用计数器+随机字节重造。
+	return "mem-" + idgen.NanoID()
 }
 
 // Save 保存单条记忆条目
@@ -279,6 +306,14 @@ func matchQuery(entry Entry, query SearchQuery) bool {
 				return false
 			}
 		}
+	}
+
+	// 溯源过滤
+	if query.ExcludeStale && entry.Stale {
+		return false
+	}
+	if query.CauseBy != "" && entry.CauseBy != query.CauseBy {
+		return false
 	}
 
 	return true

@@ -4,28 +4,45 @@ import (
 	"encoding/json"
 	"log"
 	"reflect"
+	"sort"
 	"strconv"
 	"strings"
 )
 
-// Schema 表示 JSON Schema 定义
+// Draft2020_12 是 JSON Schema 2020-12 方言（dialect）的标识 URI。
+//
+// 用于在独立 Schema 文档或结构化输出场景声明所用方言。
+// 注意：多数 LLM 的工具参数（Anthropic input_schema / OpenAI parameters）
+// 不接受内嵌 $schema 字段，因此本框架默认不输出 $schema —— 仅在显式调用
+// WithDialect 时才发出，避免污染工具调用请求。
+const Draft2020_12 = "https://json-schema.org/draft/2020-12/schema"
+
+// Schema 表示 JSON Schema 定义（兼容 JSON Schema 2020-12 方言）
 // 用于描述 LLM 工具参数的结构和约束
 type Schema struct {
-	Type                 string             `json:"type"`
-	Title                string             `json:"title,omitempty"`
-	Description          string             `json:"description,omitempty"`
-	Properties           map[string]*Schema `json:"properties,omitempty"`
-	Required             []string           `json:"required,omitempty"`
-	Items                *Schema            `json:"items,omitempty"`
-	AdditionalProperties *Schema            `json:"additionalProperties,omitempty"`
-	Enum                 []any              `json:"enum,omitempty"`
-	Default              any                `json:"default,omitempty"`
-	Minimum              *float64           `json:"minimum,omitempty"`
-	Maximum              *float64           `json:"maximum,omitempty"`
-	MinLength            *int               `json:"minLength,omitempty"`
-	MaxLength            *int               `json:"maxLength,omitempty"`
-	Pattern              string             `json:"pattern,omitempty"`
-	Format               string             `json:"format,omitempty"`
+	// Dialect 为 $schema 关键字，声明本 Schema 所用的 JSON Schema 方言。
+	// 默认空（不输出），可设为 Draft2020_12。多用于独立文档/结构化输出，
+	// 工具参数一般不应设置（见 Draft2020_12 说明）。
+	Dialect     string             `json:"$schema,omitempty"`
+	Type        string             `json:"type"`
+	Title       string             `json:"title,omitempty"`
+	Description string             `json:"description,omitempty"`
+	Properties  map[string]*Schema `json:"properties,omitempty"`
+	Required    []string           `json:"required,omitempty"`
+	Items       *Schema            `json:"items,omitempty"`
+	// AdditionalProperties 控制对象是否允许声明之外的属性。
+	// 可为 *Schema（约束额外属性的结构）或 bool（false=封闭对象）。
+	// JSON Schema 2020-12 与 OpenAI strict function calling 用 false 表示
+	// "不允许未声明属性"。nil 时省略（默认行为不变）。
+	AdditionalProperties any      `json:"additionalProperties,omitempty"`
+	Enum                 []any    `json:"enum,omitempty"`
+	Default              any      `json:"default,omitempty"`
+	Minimum              *float64 `json:"minimum,omitempty"`
+	Maximum              *float64 `json:"maximum,omitempty"`
+	MinLength            *int     `json:"minLength,omitempty"`
+	MaxLength            *int     `json:"maxLength,omitempty"`
+	Pattern              string   `json:"pattern,omitempty"`
+	Format               string   `json:"format,omitempty"`
 }
 
 // String 返回 Schema 的 JSON 字符串表示
@@ -38,6 +55,33 @@ func (s *Schema) String() string {
 func (s *Schema) MarshalJSON() ([]byte, error) {
 	type Alias Schema
 	return json.Marshal((*Alias)(s))
+}
+
+// WithDialect 设置 $schema 方言并返回自身（链式）。
+// 典型用法 s.WithDialect(schema.Draft2020_12)。
+func (s *Schema) WithDialect(dialect string) *Schema {
+	s.Dialect = dialect
+	return s
+}
+
+// Strict 将对象 Schema 标记为"封闭对象"并返回自身（链式）：
+//   - additionalProperties = false（不允许未声明属性）
+//   - 所有已声明属性进入 required
+//
+// 符合 JSON Schema 2020-12 封闭对象约定与 OpenAI strict function calling 要求。
+// 仅作用于当前对象层（非递归）；非 object 类型时不做任何改动。
+// required 列表按属性名排序以保证输出确定性。
+func (s *Schema) Strict() *Schema {
+	if s.Type != "object" {
+		return s
+	}
+	s.AdditionalProperties = false
+	s.Required = make([]string, 0, len(s.Properties))
+	for name := range s.Properties {
+		s.Required = append(s.Required, name)
+	}
+	sort.Strings(s.Required)
+	return s
 }
 
 // Of 从 Go 类型生成 Schema

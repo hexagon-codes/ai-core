@@ -2,14 +2,13 @@ package memory
 
 import (
 	"context"
-	cryptoRand "crypto/rand"
-	"encoding/hex"
 	"fmt"
 	"math"
 	"sort"
 	"sync"
-	"sync/atomic"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/util/idgen"
 )
 
 // Embedder 向量嵌入接口
@@ -381,15 +380,10 @@ func (m *VectorMemory) Stats() MemoryStats {
 }
 
 // vectorIDCounter 用于生成唯一向量 ID 的原子计数器
-var vectorIDCounter atomic.Uint64
-
 // generateVectorID 生成向量记忆 ID
-// 使用原子计数器 + 随机数确保高并发下的唯一性
+// 复用 toolkit NanoID（抗碰撞），不自行用计数器+随机字节重造。
 func generateVectorID() string {
-	counter := vectorIDCounter.Add(1)
-	randomBytes := make([]byte, 4)
-	_, _ = cryptoRand.Read(randomBytes)
-	return fmt.Sprintf("vec-%d-%s", counter, hex.EncodeToString(randomBytes))
+	return "vec-" + idgen.NanoID()
 }
 
 // ============== 内存向量存储 ==============
