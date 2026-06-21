@@ -6,14 +6,15 @@ import (
 	"time"
 )
 
-// TestTimeoutReader_Bug_RedeliverAfterTimeout verifies that an item whose
-// arrival raced (and lost to) the timeout is discarded rather than being
-// re-delivered on the next recv() (off-by-one desync).
-func TestTimeoutReader_Bug_RedeliverAfterTimeout(t *testing.T) {
+// TestTimeoutReader_LosslessAfterTimeout verifies the lossless semantic: items
+// that become ready only after a recv() timed out are NOT dropped — they are
+// delivered, in order, on subsequent recv() calls. A timeout means "not ready
+// yet", never "data destroyed". (Replaces an earlier test that asserted the
+// drop semantic; see F2 — Timeout is now lossless by design.)
+func TestTimeoutReader_LosslessAfterTimeout(t *testing.T) {
 	src, w := Pipe[string](0)
 
-	// Producer: "a" arrives after the timeout window (it will be abandoned),
-	// then "b" arrives shortly after.
+	// Producer: both elements arrive only after the 15ms timeout window.
 	go func() {
 		time.Sleep(40 * time.Millisecond)
 		_ = w.Send("a")
@@ -28,11 +29,9 @@ func TestTimeoutReader_Bug_RedeliverAfterTimeout(t *testing.T) {
 		t.Fatalf("recv#1: want ErrStreamTimeout, got %v", err)
 	}
 
-	// "a" raced the timeout and is abandoned. Drain the rest, tolerating
-	// further intermediate timeouts. The abandoned "a" must not be
-	// re-delivered; "b" should eventually arrive.
+	// Drain the rest, tolerating intermediate timeouts. Lossless: both "a" and
+	// "b" must arrive, in order; nothing dropped.
 	var got []string
-	sawB := false
 	deadline := time.Now().Add(2 * time.Second)
 	for time.Now().Before(deadline) {
 		v, err := tr.Recv()
@@ -43,18 +42,10 @@ func TestTimeoutReader_Bug_RedeliverAfterTimeout(t *testing.T) {
 			break
 		}
 		got = append(got, v)
-		if v == "b" {
-			sawB = true
-		}
 	}
 
-	for _, v := range got {
-		if v == "a" {
-			t.Fatalf("timed-out item \"a\" was re-delivered (desync): got %v", got)
-		}
-	}
-	if !sawB {
-		t.Fatalf("expected to receive \"b\" after timeout, got %v", got)
+	if len(got) != 2 || got[0] != "a" || got[1] != "b" {
+		t.Fatalf("lossless violated: want [a b] after timeout, got %v", got)
 	}
 }
 

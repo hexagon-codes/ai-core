@@ -816,7 +816,11 @@ func (br *bufferReader[T]) close() error {
 	return br.source.Close()
 }
 
-// Timeout 带超时的流
+// Timeout 给流的每次 Recv 加超时：若 d 内没有新元素就绪，返回 ErrStreamTimeout。
+//
+// 无损语义：超时不丢弃数据。ErrStreamTimeout 只表示"暂未就绪"，那条元素仍会在
+// 后续某次 Recv 中按序投递（与 stdlib select + 超时不消费 channel 值一致）。
+// 若需要"丢弃慢元素、只取最新"的语义，请用 Throttle / Debounce / Window。
 func Timeout[T any](sr *StreamReader[T], d time.Duration) *StreamReader[T] {
 	return &StreamReader[T]{
 		typ: readerTypeTimeout,
@@ -834,18 +838,17 @@ func Timeout[T any](sr *StreamReader[T], d time.Duration) *StreamReader[T] {
 // recv() 只需从 resultCh 中带超时地读取即可。
 //
 // 语义说明：
-//   - recv() 超时返回 ErrStreamTimeout 后，那条"赛跑输给超时"的元素被视为已放弃，
-//     下一次 recv() 会丢弃它而不是重新投递（避免 off-by-one 串位）。
+//   - 无损：recv() 超时返回 ErrStreamTimeout 后不丢弃元素；在途元素留在 resultCh，
+//     下一次 recv() 按序投递它（持久 goroutine 至多预读 1 条，天然背压，不丢数据）。
 //   - 后台 goroutine 通过 done 通道 + 关闭 source 退出；并注册 finalizer，
 //     即便调用方未显式 Close()，对象被 GC 时也会释放 goroutine，不泄漏。
 type timeoutReader[T any] struct {
-	source         *StreamReader[T]
-	timeout        time.Duration
-	resultCh       chan recvResult[T] // 后台 goroutine 的结果缓冲
-	done           chan struct{}      // 关闭后通知后台 goroutine 退出
-	initOnce       sync.Once
-	closeOnce      sync.Once
-	pendingDiscard bool // 上次 recv 超时，下一条到达的元素需丢弃
+	source    *StreamReader[T]
+	timeout   time.Duration
+	resultCh  chan recvResult[T] // 后台 goroutine 的结果缓冲
+	done      chan struct{}      // 关闭后通知后台 goroutine 退出
+	initOnce  sync.Once
+	closeOnce sync.Once
 }
 
 // recvResult 封装一次 Recv 的结果
@@ -884,28 +887,17 @@ func (tr *timeoutReader[T]) init() {
 func (tr *timeoutReader[T]) recv() (T, error) {
 	tr.init()
 
-	for {
-		select {
-		case result, ok := <-tr.resultCh:
-			if !ok {
-				var zero T
-				return zero, io.EOF
-			}
-			// 丢弃上次超时遗留的元素，继续取下一条。
-			if tr.pendingDiscard {
-				tr.pendingDiscard = false
-				if result.err != nil {
-					return result.item, result.err
-				}
-				continue
-			}
-			return result.item, result.err
-		case <-time.After(tr.timeout):
-			// 标记：这条正在路上的元素已放弃，下次 recv 丢弃它。
-			tr.pendingDiscard = true
+	// 无损：超时只返回信号，不消费 resultCh 中的在途元素，它会在下次 recv 投递。
+	select {
+	case result, ok := <-tr.resultCh:
+		if !ok {
 			var zero T
-			return zero, ErrStreamTimeout
+			return zero, io.EOF
 		}
+		return result.item, result.err
+	case <-time.After(tr.timeout):
+		var zero T
+		return zero, ErrStreamTimeout
 	}
 }
 
