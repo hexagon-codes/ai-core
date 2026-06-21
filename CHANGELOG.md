@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.1.6]
+### Changed
+- `streamx`：`Timeout` 改为**无损语义** —— 超时返回 `ErrStreamTimeout` 不再丢弃在途元素，该元素在后续 `recv` 按序投递（原实现会丢弃超时后首条到达的元素，造成静默数据丢失）。与 stdlib `select` + 超时不消费 channel 值一致；"丢弃慢元素 / 只取最新"请改用 `Throttle`/`Debounce`/`Window`。
+- `llm/failover`：`ClassifyError` 凭证关键词收窄 —— 裸"无效"不再判为 `FailInvalidKey`，避免"无效参数 / 无效模型 / 无效分辨率"等非凭证错误被误判为凭证无效；非凭证错误改归 `FailUnknown`。
+
 ## [0.1.5]
 ### Changed
 - `llm/failover`：`ClassifyError` 错误分类加固 —— 移除裸 HTTP 状态码子串匹配（避免 request id / 模型名误命中），无效凭证判定置于配额之前以便快速失败。
