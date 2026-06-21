@@ -105,9 +105,7 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 		case strings.Contains(msg, "too many requests") ||
 			strings.Contains(msg, "rate limit") || strings.Contains(msg, "请求过于频繁"):
 			return FailRateLimit
-		case strings.Contains(msg, "invalid api key") || strings.Contains(msg, "invalid_api_key") ||
-			strings.Contains(msg, "incorrect api key") || strings.Contains(msg, "unauthorized") ||
-			strings.Contains(msg, "authentication") || strings.Contains(msg, "无效"):
+		case isInvalidKeyError(msg):
 			return FailInvalidKey
 		case isQuotaBillingError(msg):
 			return FailQuotaExceeded
@@ -126,6 +124,25 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 	}
 
 	return FailUnknown
+}
+
+// isInvalidKeyError 模糊判定凭证 / 鉴权类错误（各 Provider message 不统一）。
+// 仅匹配凭证语境关键词，避免裸 "无效" 误命中"无效参数 / 无效模型 / 无效分辨率"等
+// 非凭证错误——它们应归 FailUnknown，而非直接快速失败为凭证无效。
+func isInvalidKeyError(text string) bool {
+	s := strings.ToLower(text)
+	markers := []string{
+		"invalid api key", "invalid_api_key", "incorrect api key",
+		"invalid authentication", "unauthorized", "authentication",
+		"无效的 api", "无效的api", "无效 api", "无效密钥", "无效的密钥",
+		"密钥无效", "无效凭证", "凭证无效", "鉴权失败", "认证失败", "未授权",
+	}
+	for _, m := range markers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // isQuotaBillingError 模糊判定余额不足 / 配额耗尽 / 计费类错误（各 Provider message 不统一）。
