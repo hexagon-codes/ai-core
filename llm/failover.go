@@ -73,8 +73,12 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 	case 402:
 		return FailQuotaExceeded
 	case 400:
+		// 400 可能携带 context 超长 / 配额耗尽 等不同语义，依据响应体细分。
 		if isContextLengthError(body) {
 			return FailContextTooLong
+		}
+		if isQuotaBillingError(body) {
+			return FailQuotaExceeded
 		}
 		return FailUnknown
 	case 401, 403:
@@ -92,24 +96,28 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 		}
 
 		// 3. error 消息模式匹配（上游库可能没暴露 httpStatus）。优先英文关键词，中文兜底。
+		// 仅匹配语义关键词，不匹配裸状态码数字：裸 "402"/"404" 等会误命中 request id /
+		// 模型名（如 "req_1402..."、"gpt-404-turbo"）。
+		// 无效凭证先于配额判定：配额关键词（insufficient/balance）常与凭证错误同现，
+		// 误判为配额会触发重试+换凭证，而无效 Key 应直接快速失败。
 		msg := strings.ToLower(err.Error())
 		switch {
-		case strings.Contains(msg, "429") || strings.Contains(msg, "too many requests") ||
+		case strings.Contains(msg, "too many requests") ||
 			strings.Contains(msg, "rate limit") || strings.Contains(msg, "请求过于频繁"):
 			return FailRateLimit
-		case strings.Contains(msg, "402") || strings.Contains(msg, "insufficient") ||
-			strings.Contains(msg, "quota") || strings.Contains(msg, "balance") ||
-			strings.Contains(msg, "credit") || strings.Contains(msg, "billing") ||
-			strings.Contains(msg, "余额") || strings.Contains(msg, "欠费"):
+		case strings.Contains(msg, "invalid api key") || strings.Contains(msg, "invalid_api_key") ||
+			strings.Contains(msg, "incorrect api key") || strings.Contains(msg, "unauthorized") ||
+			strings.Contains(msg, "authentication") || strings.Contains(msg, "无效"):
+			return FailInvalidKey
+		case isQuotaBillingError(msg):
 			return FailQuotaExceeded
 		case isContextLengthError(msg):
 			return FailContextTooLong
-		case strings.Contains(msg, "401") || strings.Contains(msg, "invalid api key") || strings.Contains(msg, "unauthorized"):
-			return FailInvalidKey
-		case strings.Contains(msg, "404") || strings.Contains(msg, "model not found") || strings.Contains(msg, "does not exist"):
+		case strings.Contains(msg, "model not found") || strings.Contains(msg, "does not exist"):
 			return FailModelNotFound
-		case strings.Contains(msg, "503") || strings.Contains(msg, "502") || strings.Contains(msg, "504") ||
-			strings.Contains(msg, "service unavailable") || strings.Contains(msg, "bad gateway") ||
+		case strings.Contains(msg, "unavailable") || strings.Contains(msg, "bad gateway") ||
+			strings.Contains(msg, "gateway timeout") || strings.Contains(msg, "internal server error") ||
+			strings.Contains(msg, "overloaded") || strings.Contains(msg, "server error") ||
 			strings.Contains(msg, "timeout") || strings.Contains(msg, "connection") ||
 			strings.Contains(msg, "deadline") || strings.Contains(msg, "temporary") ||
 			strings.Contains(msg, "transient"):
@@ -118,6 +126,22 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 	}
 
 	return FailUnknown
+}
+
+// isQuotaBillingError 模糊判定余额不足 / 配额耗尽 / 计费类错误（各 Provider message 不统一）。
+func isQuotaBillingError(text string) bool {
+	s := strings.ToLower(text)
+	markers := []string{
+		"insufficient_quota", "insufficient quota", "insufficient funds",
+		"insufficient balance", "exceeded your current quota", "out of credit",
+		"quota", "billing", "余额", "欠费",
+	}
+	for _, m := range markers {
+		if strings.Contains(s, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // isContextLengthError 模糊判定上下文超长错误（各 Provider message 不统一）。

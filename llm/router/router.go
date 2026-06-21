@@ -13,6 +13,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // Strategy 路由策略
@@ -672,16 +673,42 @@ func (e *MultiProviderError) Error() string {
 }
 
 // ExecuteWithRetry 带重试执行
+//
+// 每次尝试前检查 ctx，并在重试间使用指数退避（退避同样受 ctx 控制）；
+// ctx 取消/超时立即返回，不再无谓地继续调用 Provider。
+// 收集各次尝试的错误，全部失败后返回 MultiProviderError。
 func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionRequest, maxRetries int) (*llm.CompletionResponse, error) {
-	errors := make(map[string]error)
-
-	for i := 0; i < maxRetries; i++ {
-		resp, err := router.Complete(ctx, req)
-		if err == nil {
-			return resp, nil
-		}
-		errors[fmt.Sprintf("attempt_%d", i+1)] = err
+	if maxRetries < 1 {
+		maxRetries = 1
 	}
 
-	return nil, &MultiProviderError{Errors: errors}
+	errs := make(map[string]error)
+	var resp *llm.CompletionResponse
+	attempt := 0
+
+	err := retry.DoWithContext(ctx, func() error {
+		attempt++
+		r, e := router.Complete(ctx, req)
+		if e != nil {
+			errs[fmt.Sprintf("attempt_%d", attempt)] = e
+			return e
+		}
+		resp = r
+		return nil
+	},
+		retry.Attempts(maxRetries),
+		retry.Delay(200*time.Millisecond),
+		retry.Multiplier(2),
+		retry.MaxDelay(10*time.Second),
+	)
+	if err == nil {
+		return resp, nil
+	}
+
+	// ctx 取消/超时：透传，便于调用方区分（区别于 Provider 业务错误）。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+
+	return nil, &MultiProviderError{Errors: errs}
 }

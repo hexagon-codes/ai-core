@@ -3,6 +3,7 @@ package meter
 import (
 	"encoding/json"
 	"fmt"
+	"math"
 	"sort"
 	"strings"
 	"sync"
@@ -114,9 +115,25 @@ type Meter struct {
 	successRequests atomic.Int64 // 成功请求数
 	inputTokens     atomic.Int64 // 总输入 Token
 	outputTokens    atomic.Int64 // 总输出 Token
-	totalLatency    atomic.Int64 // 总延迟（纳秒）
-	latencyCount    atomic.Int64 // 有延迟记录的请求数（用于计算平均值）
-	totalCost       atomic.Int64 // 累计成本（微美元，即 cost * 1_000_000）
+	totalLatency    atomic.Int64  // 总延迟（纳秒）
+	latencyCount    atomic.Int64  // 有延迟记录的请求数（用于计算平均值）
+	totalCost       atomic.Uint64 // 累计成本（美元，按 float64 bits 存储，避免微美元取整丢失低额成本）
+}
+
+// addCost 以 float64 精度原子累加成本（CAS 循环，避免单条记录取整丢失 < 1 微美元的成本）。
+func (m *Meter) addCost(delta float64) {
+	for {
+		old := m.totalCost.Load()
+		newVal := math.Float64bits(math.Float64frombits(old) + delta)
+		if m.totalCost.CompareAndSwap(old, newVal) {
+			return
+		}
+	}
+}
+
+// loadCost 读取以 float64 bits 存储的累计成本。
+func (m *Meter) loadCost() float64 {
+	return math.Float64frombits(m.totalCost.Load())
 }
 
 // New 创建新的用量统计器
@@ -227,12 +244,13 @@ func (m *Meter) RecordWithDetails(model string, inputTokens, outputTokens int, l
 		m.latencyCount.Add(1)
 	}
 
-	// 累计成本（存为微美元 int64，与 records 清理无关）
+	// 累计成本（以 float64 精度累加，与 records 清理无关）。
+	// 不做单条取整，使 Stats() 全局成本与 StatsByModel() 按模型成本一致。
 	m.mu.RLock()
 	if pricing, ok := m.pricing[model]; ok {
-		costMicro := int64(float64(inputTokens)/1_000_000*pricing.InputPrice*1_000_000) +
-			int64(float64(outputTokens)/1_000_000*pricing.OutputPrice*1_000_000)
-		m.totalCost.Add(costMicro)
+		cost := float64(inputTokens)/1_000_000*pricing.InputPrice +
+			float64(outputTokens)/1_000_000*pricing.OutputPrice
+		m.addCost(cost)
 	}
 	m.mu.RUnlock()
 }
@@ -259,8 +277,8 @@ func (m *Meter) Stats() Stats {
 	}
 
 	// Use cumulative atomic counter for cost (consistent with TotalRequests
-	// even after records are pruned). Stored as micro-dollars.
-	stats.EstimatedCost = float64(m.totalCost.Load()) / 1_000_000
+	// even after records are pruned). Stored as float64 bits.
+	stats.EstimatedCost = m.loadCost()
 
 	// 计算平均延迟（使用原子计数器，反映全部历史）
 	latencyCount := m.latencyCount.Load()
@@ -411,6 +429,8 @@ func (m *Meter) Clear() {
 	m.latencyCount.Store(0)
 	m.totalCost.Store(0)
 }
+
+// 注：totalCost 存的是 float64 bits；0.0 的 bits 恰为 0，故 Store(0) 即重置为 0.0。
 
 // Report 生成人类可读的文本报告
 // 包含总体统计和按模型分组的详细信息

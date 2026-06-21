@@ -6,7 +6,6 @@
 //   - 流操作符：Map、Filter、Reduce、Copy、Merge、Buffer、Timeout
 //   - 类型注册：注册自定义类型的合并、分块函数
 //
-//
 // 使用示例：
 //
 //	// 创建管道流
@@ -27,6 +26,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"runtime"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -832,11 +832,20 @@ func Timeout[T any](sr *StreamReader[T], d time.Duration) *StreamReader[T] {
 // 使用持久化 goroutine 避免每次 recv() 泄漏 goroutine。
 // 后台 goroutine 持续从 source 读取并放入 resultCh，
 // recv() 只需从 resultCh 中带超时地读取即可。
+//
+// 语义说明：
+//   - recv() 超时返回 ErrStreamTimeout 后，那条"赛跑输给超时"的元素被视为已放弃，
+//     下一次 recv() 会丢弃它而不是重新投递（避免 off-by-one 串位）。
+//   - 后台 goroutine 通过 done 通道 + 关闭 source 退出；并注册 finalizer，
+//     即便调用方未显式 Close()，对象被 GC 时也会释放 goroutine，不泄漏。
 type timeoutReader[T any] struct {
-	source   *StreamReader[T]
-	timeout  time.Duration
-	resultCh chan recvResult[T] // 后台 goroutine 的结果缓冲
-	initOnce sync.Once
+	source         *StreamReader[T]
+	timeout        time.Duration
+	resultCh       chan recvResult[T] // 后台 goroutine 的结果缓冲
+	done           chan struct{}      // 关闭后通知后台 goroutine 退出
+	initOnce       sync.Once
+	closeOnce      sync.Once
+	pendingDiscard bool // 上次 recv 超时，下一条到达的元素需丢弃
 }
 
 // recvResult 封装一次 Recv 的结果
@@ -849,11 +858,21 @@ type recvResult[T any] struct {
 func (tr *timeoutReader[T]) init() {
 	tr.initOnce.Do(func() {
 		tr.resultCh = make(chan recvResult[T], 1)
+		tr.done = make(chan struct{})
+		// 即便调用方未 Close()，对象不可达时也释放后台 goroutine。
+		runtime.SetFinalizer(tr, func(r *timeoutReader[T]) { _ = r.close() })
+		done := tr.done
+		source := tr.source
+		resultCh := tr.resultCh
 		go func() {
-			defer close(tr.resultCh)
+			defer close(resultCh)
 			for {
-				item, err := tr.source.Recv()
-				tr.resultCh <- recvResult[T]{item: item, err: err}
+				item, err := source.Recv()
+				select {
+				case resultCh <- recvResult[T]{item: item, err: err}:
+				case <-done:
+					return
+				}
 				if err != nil {
 					return
 				}
@@ -865,20 +884,38 @@ func (tr *timeoutReader[T]) init() {
 func (tr *timeoutReader[T]) recv() (T, error) {
 	tr.init()
 
-	select {
-	case result, ok := <-tr.resultCh:
-		if !ok {
+	for {
+		select {
+		case result, ok := <-tr.resultCh:
+			if !ok {
+				var zero T
+				return zero, io.EOF
+			}
+			// 丢弃上次超时遗留的元素，继续取下一条。
+			if tr.pendingDiscard {
+				tr.pendingDiscard = false
+				if result.err != nil {
+					return result.item, result.err
+				}
+				continue
+			}
+			return result.item, result.err
+		case <-time.After(tr.timeout):
+			// 标记：这条正在路上的元素已放弃，下次 recv 丢弃它。
+			tr.pendingDiscard = true
 			var zero T
-			return zero, io.EOF
+			return zero, ErrStreamTimeout
 		}
-		return result.item, result.err
-	case <-time.After(tr.timeout):
-		var zero T
-		return zero, ErrStreamTimeout
 	}
 }
 
 func (tr *timeoutReader[T]) close() error {
+	tr.closeOnce.Do(func() {
+		runtime.SetFinalizer(tr, nil)
+		if tr.done != nil {
+			close(tr.done)
+		}
+	})
 	return tr.source.Close()
 }
 
@@ -1396,12 +1433,46 @@ func Distinct[T any](sr *StreamReader[T], equals func(T, T) bool) *StreamReader[
 // distinctReader 去重流读取器
 // maxSeen 限制已见元素的最大数量，防止无限流场景下 OOM。
 // 当超过 maxSeen 时，清除最早的一半记录（LRU 策略）。
+//
+// 性能：对可比较元素类型用 map(set) 做 O(1) 命中判定，整体去重 O(n)；
+// 仅当元素不可比较（slice/map/func 等无法作为 map key）时回退到 O(n) 线性
+// equals 扫描（整体 O(n^2)），以兼容任意 T 与自定义 equals。
 type distinctReader[T any] struct {
-	source  *StreamReader[T]
-	equals  func(T, T) bool
-	seen    []T
-	maxSeen int // 最大记录数，默认 10000
-	mu      sync.Mutex
+	source        *StreamReader[T]
+	equals        func(T, T) bool
+	seen          []T
+	seenSet       map[any]struct{} // 可比较类型的快速集合
+	nonComparable bool             // 探测到不可比较后置位，永久走 equals 回退
+	maxSeen       int              // 最大记录数，默认 10000
+	mu            sync.Mutex
+}
+
+// markSeen 把元素登记进集合；当元素不可比较（作为 map key 触发 panic）时，
+// 标记回退并返回 false。
+func (dr *distinctReader[T]) markSeen(item T) (added bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			dr.nonComparable = true
+			added = false
+		}
+	}()
+	if dr.seenSet == nil {
+		dr.seenSet = make(map[any]struct{})
+	}
+	dr.seenSet[any(item)] = struct{}{}
+	return true
+}
+
+// hasSeen 查询元素是否已登记；不可比较时返回 (false, false) 让调用方回退。
+func (dr *distinctReader[T]) hasSeen(item T) (found bool, ok bool) {
+	defer func() {
+		if r := recover(); r != nil {
+			dr.nonComparable = true
+			found, ok = false, false
+		}
+	}()
+	_, found = dr.seenSet[any(item)]
+	return found, true
 }
 
 func (dr *distinctReader[T]) recv() (T, error) {
@@ -1419,7 +1490,31 @@ func (dr *distinctReader[T]) recv() (T, error) {
 			return item, err
 		}
 
-		// 检查是否已见过
+		// 快速路径：可比较类型用 set 判定 O(1)。
+		if !dr.nonComparable {
+			if found, ok := dr.hasSeen(item); ok {
+				if found {
+					continue
+				}
+				if len(dr.seenSet) < maxSeen {
+					dr.markSeen(item)
+				}
+				return item, nil
+			}
+			// hasSeen 触发回退：把已收集到 set 的元素迁移到线性表，保持已见状态。
+			// key 由 any(item) 写入，动态类型即 T，故 k.(T) 断言安全；迁移顺序无关
+			// 正确性（seen 仅用于 equals 成员判定，输出顺序由到达顺序决定）。
+			if dr.seenSet != nil {
+				migrated := make([]T, 0, len(dr.seenSet))
+				for k := range dr.seenSet {
+					migrated = append(migrated, k.(T))
+				}
+				dr.seen = migrated
+				dr.seenSet = nil
+			}
+		}
+
+		// 回退路径：不可比较类型用 equals 线性扫描。
 		found := false
 		for _, s := range dr.seen {
 			if dr.equals(item, s) {
@@ -1427,7 +1522,6 @@ func (dr *distinctReader[T]) recv() (T, error) {
 				break
 			}
 		}
-
 		if !found {
 			// 防止无限流场景下 seen 列表无限增长导致 OOM
 			// 达到上限后停止去重，直接通过元素（保守策略，优于静默丢弃旧记录导致重复）
