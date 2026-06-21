@@ -1,6 +1,6 @@
 # 贡献指南 — ai-core
 
-ai-core 是 Hexagon 生态的 **L1 AI 基础能力库**（LLM Provider / Tool / Memory / Schema / streamx / template / tokenizer / meter / media / store/vector）。被 hexagon/hexclaw 依赖。
+ai-core 是 Hexagon 生态的 **L1 AI 基础能力库**（LLM Provider / Tool / Memory / Schema / streamx / template / tokenizer / meter / media / store/vector / gateway/llmcall）。被 hexagon/hexclaw 依赖。
 
 ## 分层铁律
 - ai-core 仅可依赖 **toolkit (L0)**，**不得依赖** hexagon / hexclaw。

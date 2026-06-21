@@ -6,19 +6,20 @@ Go 语言的 AI 基础能力库，为 [Hexagon](https://github.com/hexagon-codes
 
 ## 特性
 
-- **统一的 LLM 接口** - 一套代码，多家 Provider（OpenAI、Anthropic、DeepSeek、Gemini、通义千问、豆包、Ollama）
-- **中间件机制** - 可组合的 Provider 装饰器：重试（含不可重试错误检测）、限流、超时、回调、缓存（含 singleflight 防击穿）
-- **流式响应** - 统一的 SSE 流式处理，支持回调和 channel 两种模式
+- **统一的 LLM 接口** - 一套代码，多家 Provider（OpenAI、Anthropic、DeepSeek、Gemini、通义千问、豆包、文心一言、Ollama）
+- **中间件机制** - 可组合的 Provider 装饰器：重试（含不可重试错误检测）、限流、超时、回调、缓存（含 singleflight 防击穿，支持语义缓存）
+- **流式响应** - 统一的 SSE 流式处理，支持回调和 channel 两种模式；通用 `StreamReader` 四件套（Concat/Merge/Copy + Close 契约）与 gRPC 分帧解析
 - **工具系统** - 类型安全的工具定义，从 Go 结构体自动生成 JSON Schema
-- **记忆系统** *(Experimental)* - 多种记忆策略（缓冲、摘要、向量检索、多层组合、实体记忆）。此接口处于实验阶段，后续版本可能发生变更
+- **记忆系统** *(Experimental)* - 多种记忆策略（缓冲、摘要、向量检索、多层组合、实体记忆），条目支持溯源血缘与多模态。此接口处于实验阶段，后续版本可能发生变更
+- **媒体生成** - 独立媒体子域（图像 / 视频 / 语音 / 语音对话），统一 Submit→Poll 异步任务模型 + 同步包装
 - **智能路由** - 多 Provider 路由器，支持轮询、加权、最低延迟、降级等策略；任务感知智能路由
 - **用量追踪** - Token 消耗统计和成本估算（原子累加器，裁剪后数值一致），支持请求追踪器
-- **结构化输出** - ResponseFormat 支持 JSON 模式和 JSON Schema 约束
+- **结构化输出** - ResponseFormat 支持 JSON 模式和 JSON Schema 约束（含 JSON Schema 2020-12 方言）
 
 ## 安装
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.1.2
+go get github.com/hexagon-codes/ai-core@v0.1.4
 ```
 
 ## 快速开始
@@ -191,13 +192,16 @@ multi := memory.NewMultiLayerMemory(
 | `llm/gemini` | Google Gemini 实现 |
 | `llm/qwen` | 通义千问实现 |
 | `llm/ark` | 豆包（字节跳动）实现 |
+| `llm/ernie` | 文心一言（百度）实现 |
 | `llm/ollama` | Ollama 本地模型实现 |
 | `llm/router` | 多 Provider 智能路由、任务感知路由（SmartRouter） |
-| `llm/cache` | LRU 内存缓存实现（支持 TTL、singleflight 防击穿） |
-| `memory` | Agent 记忆系统（缓冲/摘要/向量/多层/实体）*Experimental* |
+| `llm/cache` | LRU 内存缓存 + 语义缓存（支持 TTL、singleflight 防击穿、SQLite 持久化） |
+| `media` | 媒体生成子域：`media/image` `media/video` `media/voice` `media/voicechat`（Submit→Poll 任务模型） |
+| `gateway/llmcall` | LLM 调用网关：带进度上报与瞬时错误重试的统一调用入口 |
+| `memory` | Agent 记忆系统（缓冲/摘要/向量/多层/实体），支持溯源血缘与多模态条目 *Experimental* |
 | `tool` | 工具定义和注册 |
-| `schema` | JSON Schema 生成（从 Go 结构体反射） |
-| `streamx` | 流式响应统一抽象（OpenAI/Claude/Gemini 格式） |
+| `schema` | JSON Schema 生成（从 Go 结构体反射，支持 JSON Schema 2020-12 方言） |
+| `streamx` | 流式响应统一抽象（OpenAI/Claude/Gemini 格式）+ 通用 `StreamReader` / gRPC 分帧 |
 | `template` | Prompt 模板引擎（支持多模态） |
 | `tokenizer` | Token 计数估算 |
 | `meter` | 用量统计和成本追踪（原子累加成本计数器） |
@@ -213,6 +217,7 @@ multi := memory.NewMultiLayerMemory(
 | Gemini | gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash | 流式、函数调用、视觉、Embedding |
 | 通义千问 | qwen-turbo, qwen-plus, qwen-max, qwen-vl-max | 流式、函数调用、视觉 |
 | 豆包 | doubao-pro-*, doubao-lite-*, doubao-vision-pro-* | 流式、函数调用、视觉 |
+| 文心一言 | ernie-4.5-8k, ernie-4.0-8k, ernie-3.5-8k, ernie-x1 | 流式 |
 | Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | 流式、函数调用、视觉 |
 
 ## 路由策略
@@ -229,7 +234,7 @@ multi := memory.NewMultiLayerMemory(
 
 ## 设计原则
 
-- **零外部依赖** — 仅使用 Go 标准库，`go.mod` 无第三方依赖
+- **依赖精简** — 仅依赖生态内的 `toolkit`（通用工具底座）与少量必要库（如语义缓存的 SQLite 驱动），复用 toolkit 不重造轮子
 - **接口驱动** — Provider、Memory、Tool、VectorStore 等核心类型均为接口，便于测试和扩展
 - **并发安全** — 所有公共类型均通过 `sync.RWMutex` 或 `atomic` 保证线程安全
 - **函数式选项** — 统一使用 `With*()` 选项模式配置组件

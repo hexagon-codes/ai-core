@@ -6,19 +6,20 @@ A Go library providing core AI capabilities for the [Hexagon](https://github.com
 
 ## Features
 
-- **Unified LLM Interface** — One API, multiple providers (OpenAI, Anthropic, DeepSeek, Gemini, Qwen, Doubao, Ollama)
-- **Middleware Pipeline** — Composable provider decorators: retry (with non-retryable error detection), rate limiting, timeout, callbacks, caching (with singleflight to prevent thundering herd)
-- **Streaming** — Unified SSE streaming with both callback and channel modes
+- **Unified LLM Interface** — One API, multiple providers (OpenAI, Anthropic, DeepSeek, Gemini, Qwen, Doubao, ERNIE, Ollama)
+- **Middleware Pipeline** — Composable provider decorators: retry (with non-retryable error detection), rate limiting, timeout, callbacks, caching (with singleflight to prevent thundering herd, including semantic cache)
+- **Streaming** — Unified SSE streaming with both callback and channel modes; generic `StreamReader` quartet (Concat/Merge/Copy + Close contract) and gRPC frame parsing
 - **Tool System** — Type-safe tool definitions with automatic JSON Schema generation from Go structs
-- **Memory System** *(Experimental)* — Multiple memory strategies (buffer, summary, vector retrieval, multi-layer, entity memory). This interface is experimental and may change in future versions
+- **Memory System** *(Experimental)* — Multiple memory strategies (buffer, summary, vector retrieval, multi-layer, entity memory), entries support provenance lineage and multimodal content. This interface is experimental and may change in future versions
+- **Media Generation** — Dedicated media subdomain (image / video / voice / voice chat) with a unified Submit→Poll async task model plus synchronous wrappers
 - **Smart Routing** — Multi-provider router with round-robin, weighted, least-latency, fallback strategies; task-aware intelligent routing
 - **Usage Tracking** — Token consumption statistics and cost estimation (atomic cumulative counter, consistent after pruning) with request tracing
-- **Structured Output** — ResponseFormat supporting JSON mode and JSON Schema constraints
+- **Structured Output** — ResponseFormat supporting JSON mode and JSON Schema constraints (including the JSON Schema 2020-12 dialect)
 
 ## Installation
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.1.2
+go get github.com/hexagon-codes/ai-core@v0.1.4
 ```
 
 ## Quick Start
@@ -192,13 +193,16 @@ multi := memory.NewMultiLayerMemory(
 | `llm/gemini` | Google Gemini implementation |
 | `llm/qwen` | Qwen (Alibaba) implementation |
 | `llm/ark` | Doubao (ByteDance) implementation |
+| `llm/ernie` | ERNIE (Baidu) implementation |
 | `llm/ollama` | Ollama local model implementation |
 | `llm/router` | Multi-provider intelligent routing, task-aware routing (SmartRouter) |
-| `llm/cache` | LRU in-memory cache (with TTL support, singleflight) |
-| `memory` | Agent memory system (buffer/summary/vector/multi-layer/entity) *Experimental* |
+| `llm/cache` | LRU in-memory cache + semantic cache (TTL, singleflight, SQLite persistence) |
+| `media` | Media generation subdomain: `media/image` `media/video` `media/voice` `media/voicechat` (Submit→Poll task model) |
+| `gateway/llmcall` | LLM call gateway: unified entry point with progress reporting and transient-error retry |
+| `memory` | Agent memory system (buffer/summary/vector/multi-layer/entity), with provenance lineage and multimodal entries *Experimental* |
 | `tool` | Tool definition and registration |
-| `schema` | JSON Schema generation (reflection from Go structs) |
-| `streamx` | Unified streaming abstraction (OpenAI/Claude/Gemini formats) |
+| `schema` | JSON Schema generation (reflection from Go structs, supports the JSON Schema 2020-12 dialect) |
+| `streamx` | Unified streaming abstraction (OpenAI/Claude/Gemini formats) + generic `StreamReader` / gRPC framing |
 | `template` | Prompt template engine (multimodal support) |
 | `tokenizer` | Token count estimation |
 | `meter` | Usage statistics and cost tracking (atomic cumulative cost counter) |
@@ -214,6 +218,7 @@ multi := memory.NewMultiLayerMemory(
 | Gemini | gemini-2.0-flash, gemini-1.5-pro, gemini-1.5-flash | Streaming, function calling, vision, embedding |
 | Qwen | qwen-turbo, qwen-plus, qwen-max, qwen-vl-max | Streaming, function calling, vision |
 | Doubao | doubao-pro-*, doubao-lite-*, doubao-vision-pro-* | Streaming, function calling, vision |
+| ERNIE | ernie-4.5-8k, ernie-4.0-8k, ernie-3.5-8k, ernie-x1 | Streaming |
 | Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | Streaming, function calling, vision |
 
 ## Routing Strategies
@@ -230,7 +235,7 @@ multi := memory.NewMultiLayerMemory(
 
 ## Design Principles
 
-- **Zero External Dependencies** — Standard library only; no third-party dependencies in `go.mod`
+- **Minimal Dependencies** — Depends only on the in-ecosystem `toolkit` (shared utility foundation) plus a few necessary libraries (such as the SQLite driver for the semantic cache); reuses toolkit instead of reinventing wheels
 - **Interface-Driven** — Provider, Memory, Tool, VectorStore and other core types are interfaces for easy testing and extension
 - **Concurrency-Safe** — All public types are thread-safe via `sync.RWMutex` or `atomic`
 - **Functional Options** — Unified `With*()` option pattern for component configuration
