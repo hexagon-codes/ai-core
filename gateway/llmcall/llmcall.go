@@ -19,10 +19,12 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/toolkit/util/retry"
 )
 
 // ProgressStage 是 LLM 调用的粗粒度阶段。
@@ -92,38 +94,59 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 	}
 
 	start := time.Now()
-	var lastErr error
-	for attempt := 1; attempt <= maxRetries; attempt++ {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if attempt == 1 {
-			emit(StageStarting, attempt, "")
-		} else {
-			emit(StageRetrying, attempt, lastErr.Error())
-		}
+	emit(StageStarting, 1, "")
 
-		resp, err := req.Provider.Complete(ctx, req.Req)
-		if err == nil {
-			emit(StageCompleted, attempt, "")
-			return &Response{
-				CompletionResponse: resp,
-				Attempts:           attempt,
-				Elapsed:            time.Since(start),
-			}, nil
+	// 委托给 toolkit/util/retry.DoWithContext（参考 ai-core/llm/middleware.go、
+	// ai-core/llm/router/router.go 的用法）。
+	//   - retry.Attempts(maxRetries): 总尝试次数（含首次），与旧 for 1..maxRetries 一致。
+	//   - retry.Delay(baseBackoff) + retry.Multiplier(2): 指数退避序列
+	//     baseBackoff*2^(n-1)（500ms、1s、2s…），与旧 baseBackoff*(1<<(attempt-1)) 逐项相同。
+	//   - retry.RetryIf(isTransient): 仅瞬时错误重试，非瞬时错误立即停止（等价旧 break）。
+	//   - retry.OnRetry: 一次失败且将重试时回调，n 为一基已尝试序号，
+	//     对应旧代码"以 attempt=n+1 发 StageRetrying"。
+	// ctx 取消/超时由 DoWithContext 在循环顶部与退避计时器中处理，直接返回 ctx.Err()。
+	var (
+		resp     *llm.CompletionResponse
+		lastErr  error
+		attempts int
+	)
+	err := retry.DoWithContext(ctx, func() error {
+		attempts++
+		r, e := req.Provider.Complete(ctx, req.Req)
+		if e != nil {
+			lastErr = e
+			return e
 		}
-		lastErr = err
-		if !isTransient(err) {
-			break
-		}
-		if attempt < maxRetries {
-			select {
-			case <-ctx.Done():
-				return nil, ctx.Err()
-			case <-time.After(baseBackoff * (1 << (attempt - 1))):
-			}
-		}
+		resp = r
+		return nil
+	},
+		retry.Attempts(maxRetries),
+		retry.Delay(baseBackoff),
+		retry.Multiplier(2),
+		// 旧实现退避无上限，故将 MaxDelay 设为实质无界（toolkit 默认 30s 会截断，
+		// 与旧 baseBackoff*2^(n-1) 不一致）；仅保留 toolkit 内部对 time.Duration 溢出的兜底。
+		retry.MaxDelay(time.Duration(math.MaxInt64)),
+		retry.RetryIf(isTransient),
+		retry.OnRetry(func(n int, e error) {
+			emit(StageRetrying, n+1, e.Error())
+		}),
+	)
+	if err == nil {
+		emit(StageCompleted, attempts, "")
+		return &Response{
+			CompletionResponse: resp,
+			Attempts:           attempts,
+			Elapsed:            time.Since(start),
+		}, nil
 	}
+
+	// ctx 取消/超时：透传原始 ctx.Err()（区别于 Provider 业务错误），与旧行为一致。
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		return nil, ctxErr
+	}
+
+	// 失败路径统一返回 (attempts=maxRetries) 包装错误，%w 保留 LLM 原文 error。
+	// 注意：无论是重试耗尽还是非瞬时错误提前停止，旧代码均落到此分支，故沿用 maxRetries。
 	return nil, fmt.Errorf("llmcall: 调用失败 (attempts=%d): %w", maxRetries, lastErr)
 }
 
