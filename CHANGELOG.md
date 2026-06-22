@@ -4,6 +4,11 @@
 
 ## [Unreleased]
 
+## [0.1.7]
+### Changed
+- `gateway/llmcall`：`CallWithProgress` 的重试退避委托给 `toolkit/util/retry.DoWithContext`，替换手写 `for attempt` 循环。**行为保真**：退避序列 `baseBackoff*2^(n-1)`、仅瞬时错误重试（`RetryIf(isTransient)`）、ctx 取消/超时透传 `ctx.Err()`、`attempts` 计数与失败错误包装 `(attempts=maxRetries)` 均与旧实现逐项一致。
+- 依赖：`github.com/hexagon-codes/toolkit` v0.2.0 → v0.2.1（`net/httpx.RawClient` 默认遵循 `HTTP(S)_PROXY`/`NO_PROXY`）。
+
 ## [0.1.6]
 ### Changed
 - `streamx`：`Timeout` 改为**无损语义** —— 超时返回 `ErrStreamTimeout` 不再丢弃在途元素，该元素在后续 `recv` 按序投递（原实现会丢弃超时后首条到达的元素，造成静默数据丢失）。与 stdlib `select` + 超时不消费 channel 值一致；"丢弃慢元素 / 只取最新"请改用 `Throttle`/`Debounce`/`Window`。
