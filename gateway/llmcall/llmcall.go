@@ -23,8 +23,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/toolkit/util/retry"
+
+	"github.com/hexagon-codes/ai-core/llm"
 )
 
 // ProgressStage 是 LLM 调用的粗粒度阶段。
@@ -63,7 +64,7 @@ type Request struct {
 // Response gateway 返回值（直接转发 LLM response + 调用 metadata）。
 type Response struct {
 	*llm.CompletionResponse
-	Attempts int           // 实际尝试次数（含成功那次）
+	Attempts int // 实际尝试次数（含成功那次）
 	Elapsed  time.Duration
 }
 
