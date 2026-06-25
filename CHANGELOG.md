@@ -4,6 +4,10 @@
 
 ## [Unreleased]
 
+## [0.1.8]
+### Fixed
+- `media/image`：`truncateForError` 改为 **rune-safe 截断**（委托 `toolkit/lang/stringx.SubString`）—— 原以字节切片 `s[:maxLen]`，当 `maxLen` 落在多字节 UTF-8 字符（如 CJK）中间时会切断码点产出乱码（BUG-20260625 F-4）；无需截断时不再追加省略号，与旧实现「`<=maxLen` 原样返回」语义一致。
+
 ## [0.1.7]
 ### Changed
 - `gateway/llmcall`：`CallWithProgress` 的重试退避委托给 `toolkit/util/retry.DoWithContext`，替换手写 `for attempt` 循环。**行为保真**：退避序列 `baseBackoff*2^(n-1)`、仅瞬时错误重试（`RetryIf(isTransient)`）、ctx 取消/超时透传 `ctx.Err()`、`attempts` 计数与失败错误包装 `(attempts=maxRetries)` 均与旧实现逐项一致。
