@@ -9,6 +9,8 @@ import (
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/toolkit/lang/stringx"
 )
 
 // DefaultOpenAIBaseURL OpenAI 默认 endpoint（可被 Azure/智谱兼容 endpoint 覆盖）
@@ -194,8 +196,10 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 }
 
 func truncateForError(s string, maxLen int) string {
-	if len(s) <= maxLen {
+	// rune-safe 截断（委托 toolkit stringx.SubString），避免 CJK 字节切断产生乱码（BUG-20260625 F-4）。
+	head := stringx.SubString(s, 0, maxLen)
+	if head == s {
 		return s
 	}
-	return s[:maxLen] + "..."
+	return head + "..."
 }
