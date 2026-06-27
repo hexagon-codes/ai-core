@@ -14,6 +14,9 @@ linters:
     errcheck:
       check-type-assertions: true
       check-blank: true
+      # WebSocket 清理性 Close（带状态码参数，签名不符 io.Closer 故不在内置豁免内）等同 io.Closer.Close 处理。
+      exclude-functions:
+        - (*github.com/coder/websocket.Conn).Close
     gocritic:
       disabled-checks:
         - hugeParam

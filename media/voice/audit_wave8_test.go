@@ -1020,75 +1020,9 @@ func TestAzureTTS_Synthesize_Non200_Injected(t *testing.T) {
 	}
 }
 
-// ---------------------------------------------------------------------------
-// 回归: EdgeTTS 端点硬编码且无 client/baseURL 注入点，合成请求/响应解析无法单测（bug #2）
-//
-// 修复前：EdgeTTS 把 endpoint（https://eastus.api.speech.microsoft.com/...）与 http.Client
-// 硬编码进实现，没有注入点，合成请求构造与响应解析无法 mock。修复后新增
-// EdgeTTSWithEndpoint/EdgeTTSWithHTTPClient additive option。本测试用 httptest 断言
-// 请求构造（SSML rate/voice 转义、header）与响应解析，永久钉死，不得删除或弱化。
-// ---------------------------------------------------------------------------
-
-func TestEdgeTTS_Synthesize_RequestAndResponse_Injected(t *testing.T) {
-	var gotContentType, gotOutFormat, gotBody string
-
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		gotContentType = r.Header.Get("Content-Type")
-		gotOutFormat = r.Header.Get("X-Microsoft-OutputFormat")
-		raw, _ := io.ReadAll(r.Body)
-		gotBody = string(raw)
-		_, _ = w.Write([]byte("FAKE-EDGE-MP3"))
-	}))
-	defer srv.Close()
-
-	tts := NewEdgeTTS(
-		EdgeTTSWithEndpoint(srv.URL),
-		EdgeTTSWithHTTPClient(newTestClient()),
-		EdgeTTSWithVoice("zh-CN-YunjianNeural"),
-	)
-	res, err := tts.Synthesize(context.Background(), "你好<inject>",
-		SynthesizeOptions{Speed: 1.5})
-	if err != nil {
-		t.Fatalf("Synthesize 失败: %v", err)
-	}
-
-	if gotContentType != "application/ssml+xml" {
-		t.Errorf("Content-Type = %q, want application/ssml+xml", gotContentType)
-	}
-	if gotOutFormat != "audio-16khz-128kbitrate-mono-mp3" {
-		t.Errorf("X-Microsoft-OutputFormat = %q", gotOutFormat)
-	}
-	// SSML body 应含默认 voice、speed=1.5 对应 rate=+50%、且注入字符被转义
-	if !strings.Contains(gotBody, "zh-CN-YunjianNeural") {
-		t.Errorf("SSML 未含 voice: %q", gotBody)
-	}
-	if !strings.Contains(gotBody, "+50%") {
-		t.Errorf("SSML rate 计算错误（speed 1.5 应 +50%%）: %q", gotBody)
-	}
-	if !strings.Contains(gotBody, "&lt;inject&gt;") || strings.Contains(gotBody, "<inject>") {
-		t.Errorf("SSML 注入字符未转义: %q", gotBody)
-	}
-	if string(res.Audio) != "FAKE-EDGE-MP3" || res.Size != len("FAKE-EDGE-MP3") {
-		t.Errorf("响应音频解析错误: Audio=%q Size=%d", res.Audio, res.Size)
-	}
-	if res.Format != FormatMP3 {
-		t.Errorf("Format = %q, want mp3", res.Format)
-	}
-}
-
-func TestEdgeTTS_Synthesize_Non200_Injected(t *testing.T) {
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.WriteHeader(http.StatusServiceUnavailable)
-		_, _ = io.WriteString(w, "down")
-	}))
-	defer srv.Close()
-
-	tts := NewEdgeTTS(EdgeTTSWithEndpoint(srv.URL), EdgeTTSWithHTTPClient(newTestClient()))
-	_, err := tts.Synthesize(context.Background(), "hi", SynthesizeOptions{})
-	if err == nil || !strings.Contains(err.Error(), "503") {
-		t.Errorf("应返回含 503 的错误, got %v", err)
-	}
-}
+// EdgeTTS 改走免费 WebSocket 协议（v0.4.7）后，原 HTTP 端点注入测试
+// （TestEdgeTTS_Synthesize_RequestAndResponse_Injected / _Non200_Injected）已不适用；
+// 其 SSML 构造 / speed→rate / XML 转义 / 响应解析覆盖迁移到 edge_tts_ws_test.go（WS mock 钉死）。
 
 // ---------------------------------------------------------------------------
 // 回归: MiniMaxTTS 默认使用裸 &http.Client 而非 toolkit httpx.RawClient（bug #3）

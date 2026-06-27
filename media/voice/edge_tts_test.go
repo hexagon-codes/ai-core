@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"context"
 	"testing"
 )
 
@@ -70,7 +71,7 @@ func TestEdgeTTS_Fix_v0_3_12_H5(t *testing.T) {
 
 	t.Run("after_fix_empty_text_rejected", func(t *testing.T) {
 		tts := NewEdgeTTS()
-		_, err := tts.Synthesize(nil, "", SynthesizeOptions{})
+		_, err := tts.Synthesize(context.TODO(), "", SynthesizeOptions{})
 		if err == nil {
 			t.Error("空文本应返回 error")
 		}

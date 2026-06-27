@@ -451,13 +451,7 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			if err != io.EOF {
 				s.sendErrorWithCallback(err, onError)
 			}
-			s.mu.Lock()
-			s.result.Content = contentBuf.String()
-			result := s.result
-			s.mu.Unlock()
-			if onDone != nil {
-				onDone(result)
-			}
+			s.finalize(contentBuf.String(), onDone)
 			return
 		}
 
@@ -477,13 +471,7 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			if err != nil {
 				// 如果解析失败且是结束标记，则正常结束
 				if s.parser.IsDone([]byte(data)) {
-					s.mu.Lock()
-					s.result.Content = contentBuf.String()
-					result := s.result
-					s.mu.Unlock()
-					if onDone != nil {
-						onDone(result)
-					}
+					s.finalize(contentBuf.String(), onDone)
 					return
 				}
 				s.sendErrorWithCallback(err, onError)
@@ -528,17 +516,36 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 				// 在发送 chunk 后检查是否结束
 				// 这确保了最后一个有内容的 chunk 被正确处理
 				if s.parser.IsDone([]byte(data)) {
-					s.mu.Lock()
-					s.result.Content = contentBuf.String()
-					result := s.result
-					s.mu.Unlock()
-					if onDone != nil {
-						onDone(result)
-					}
+					s.finalize(contentBuf.String(), onDone)
 					return
 				}
 			}
 		}
+	}
+}
+
+// finalize 收尾流处理：把累计正文落入 result，做工具调用兜底还原，再触发 onDone。
+//
+// processLoop 的三处结束分支（EOF/读错、解析失败遇 DONE、正常遇 DONE）共用本方法，
+// 保证收尾逻辑单点一致。兜底还原：部分模型（DeepSeek 经 OpenAI 兼容网关）把工具调用以
+// 文本标记内嵌进 content 而非结构化 tool_calls 字段，流式路径同样会把用户意图当普通文本
+// 丢弃——这里在结构化字段为空时还原结构化 ToolCalls 并剥净正文。见 inline_toolcalls.go。
+func (s *Stream) finalize(content string, onDone func(*Result)) {
+	s.mu.Lock()
+	s.result.Content = content
+	if len(s.result.ToolCalls) == 0 {
+		if calls, cleaned, ok := RecoverInlineToolCalls(s.result.Content); ok {
+			s.result.ToolCalls = calls
+			s.result.Content = cleaned
+			if s.result.FinishReason == "" || s.result.FinishReason == "stop" {
+				s.result.FinishReason = "tool_calls"
+			}
+		}
+	}
+	result := s.result
+	s.mu.Unlock()
+	if onDone != nil {
+		onDone(result)
 	}
 }
 

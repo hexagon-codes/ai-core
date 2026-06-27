@@ -483,6 +483,19 @@ func (p *Provider) parseResponse(resp *openAIResponse) *llm.CompletionResponse {
 				Arguments: tc.Function.Arguments,
 			})
 		}
+
+		// 兜底：部分模型（DeepSeek 经 OpenAI 兼容网关）把工具调用以私有标记内嵌在 content
+		// 而非结构化 tool_calls 字段，网关未翻译 → tool_calls=[] 且标记泄漏进正文，运行时当
+		// 普通文本丢弃用户意图。仅当结构化字段为空时还原，避免误改模型既有合法 content。
+		if len(result.ToolCalls) == 0 {
+			if calls, cleaned, ok := streamx.RecoverInlineToolCalls(result.Content); ok {
+				result.ToolCalls = calls
+				result.Content = cleaned
+				if result.FinishReason == "" || result.FinishReason == "stop" {
+					result.FinishReason = "tool_calls"
+				}
+			}
+		}
 	}
 
 	return result
