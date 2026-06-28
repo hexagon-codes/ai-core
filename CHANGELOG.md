@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+## [0.1.11]
+### Added
+- `template`：新增**有序内容块**（content block）模型 —— `Block` / `Blocks` / `BlockBuilder`，对齐 Anthropic Messages API 的 content block（`text` / `thinking` / `tool_use` / `tool_result`）。块的**顺序即语义**，可保真表达多步 agent（ReAct / orchestrate）的「先说什么 → 再调什么 → 又说什么」交错结构，供持久化与 replay。与输入侧多模态 `ContentPart` 职责分离、互不污染。提供构造器、`Blocks.Text()`/`ToolUses()` 退化辅助、`Validate()`（校验 `tool_result` 必须有在其之前出现的配对 `tool_use`），及 `BlockBuilder` 增量拼装。
+
+## [0.1.10]
+### Changed
+- 依赖：`github.com/hexagon-codes/toolkit` v0.2.2 → v0.2.3。
+
+## [0.1.9]
+### Changed
+- 依赖：`github.com/hexagon-codes/toolkit` v0.2.1 → v0.2.2。
+
 ## [0.1.8]
 ### Fixed
 - `media/image`：`truncateForError` 改为 **rune-safe 截断**（委托 `toolkit/lang/stringx.SubString`）—— 原以字节切片 `s[:maxLen]`，当 `maxLen` 落在多字节 UTF-8 字符（如 CJK）中间时会切断码点产出乱码（BUG-20260625 F-4）；无需截断时不再追加省略号，与旧实现「`<=maxLen` 原样返回」语义一致。
