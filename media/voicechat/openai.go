@@ -1,14 +1,15 @@
 package voicechat
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/transport"
 )
 
 // OpenAI gpt-4o-audio-preview 协议：
@@ -34,20 +35,52 @@ type openAIVoiceChat struct {
 	models  []string
 	httpc   *http.Client
 	timeout time.Duration
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
+
+type OpenAIVoiceChatOption func(*openAIVoiceChat)
 
 // NewOpenAIVoiceChat 创建 OpenAI gpt-4o-audio Provider。
 func NewOpenAIVoiceChat(apiKey, baseURL string) Provider {
+	return NewOpenAIVoiceChatWithOptions(apiKey, baseURL)
+}
+
+// NewOpenAIVoiceChatWithOptions 创建可配置的 OpenAI gpt-4o-audio Provider。
+func NewOpenAIVoiceChatWithOptions(apiKey, baseURL string, opts ...OpenAIVoiceChatOption) Provider {
 	if baseURL == "" {
 		baseURL = "https://api.openai.com/v1"
 	}
-	return &openAIVoiceChat{
+	p := &openAIVoiceChat{
 		apiKey:  apiKey,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		// 复用包级权威来源 builtinModels，避免内置模型清单与文档承诺漂移。
 		models:  BuiltinModels(),
 		httpc:   http.DefaultClient,
 		timeout: 90 * time.Second,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	p.tx = transport.NewTransport(p.httpc, p.policy)
+	return p
+}
+
+// OpenAIVoiceChatWithHTTPClient 注入自定义 HTTP client。
+func OpenAIVoiceChatWithHTTPClient(client *http.Client) OpenAIVoiceChatOption {
+	return func(p *openAIVoiceChat) {
+		if client != nil {
+			p.httpc = client
+		}
+	}
+}
+
+// OpenAIVoiceChatWithNetworkPolicy 设置上游网络出口约束。
+func OpenAIVoiceChatWithNetworkPolicy(policy llm.NetworkPolicy) OpenAIVoiceChatOption {
+	return func(p *openAIVoiceChat) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
 	}
 }
 
@@ -165,32 +198,27 @@ func (p *openAIVoiceChat) Chat(ctx context.Context, req Request) (*Result, error
 	rctx, cancel := context.WithTimeout(ctx, p.timeout)
 	defer cancel()
 
-	httpReq, err := http.NewRequestWithContext(rctx, http.MethodPost,
-		p.baseURL+"/chat/completions", bytes.NewReader(payload))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-
 	start := time.Now()
-	resp, err := p.httpc.Do(httpReq)
+	resp, err := transport.Do(rctx, transport.Request{
+		Provider:  p.Name(),
+		Action:    "chat",
+		Method:    http.MethodPost,
+		URL:       p.baseURL + "/chat/completions",
+		Body:      payload,
+		Client:    p.httpc,
+		Transport: p.tx,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+p.apiKey)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("call %s: %w", p.Name(), err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024))
-
-	if resp.StatusCode >= 400 {
-		var er oaChatResp
-		if json.Unmarshal(respBody, &er) == nil && er.Error != nil {
-			return nil, fmt.Errorf("%s HTTP %d: %s", p.Name(), resp.StatusCode, er.Error.Message)
-		}
-		return nil, fmt.Errorf("%s HTTP %d", p.Name(), resp.StatusCode)
-	}
 
 	var parsed oaChatResp
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if parsed.Error != nil {
@@ -206,6 +234,7 @@ func (p *openAIVoiceChat) Chat(ctx context.Context, req Request) (*Result, error
 		Format:     format,
 		Transcript: msg.Content,
 		UsageMs:    time.Since(start).Milliseconds(),
+		RequestID:  requestIDFromHeader(resp.Header),
 	}
 	if msg.Audio != nil {
 		res.ResponseB64 = msg.Audio.Data

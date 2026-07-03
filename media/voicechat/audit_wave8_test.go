@@ -3,6 +3,7 @@ package voicechat
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -10,6 +11,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/llm"
 )
 
 // ============================================================================
@@ -435,6 +438,19 @@ func newOpenAIWithServer(t *testing.T, apiKey string, h http.HandlerFunc) (Provi
 	t.Cleanup(srv.Close)
 	p := NewOpenAIVoiceChat(apiKey, srv.URL)
 	return p, srv
+}
+
+func TestOpenAI_NetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	p := NewOpenAIVoiceChatWithOptions("sk", "http://127.0.0.1:1",
+		OpenAIVoiceChatWithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := p.Chat(context.Background(), Request{Text: "hi"})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
+	}
 }
 
 // TestOpenAI_Chat_RequestConstruction 验证请求构造：路径、Header、modalities、audio config、messages。
