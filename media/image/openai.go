@@ -1,16 +1,16 @@
 package image
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
 
-	"github.com/hexagon-codes/toolkit/lang/stringx"
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/media"
+	"github.com/hexagon-codes/ai-core/transport"
 )
 
 // DefaultOpenAIBaseURL OpenAI 默认 endpoint（可被 Azure/智谱兼容 endpoint 覆盖）
@@ -24,16 +24,26 @@ type openAICompatProvider struct {
 	models  []string      // 支持的模型 ID 白名单
 	httpc   *http.Client  // HTTP 客户端，可注入超时
 	timeout time.Duration // 默认请求超时
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
+
+// OpenAICompatOption configures OpenAI-compatible image providers.
+type OpenAICompatOption func(*openAICompatProvider)
 
 // NewOpenAIDallE 创建 OpenAI DALL-E Provider。
 //
 // baseURL 为空时使用 DefaultOpenAIBaseURL。支持 dall-e-2 / dall-e-3 / gpt-image-1。
 func NewOpenAIDallE(apiKey, baseURL string) Provider {
+	return NewOpenAIDallEWithOptions(apiKey, baseURL)
+}
+
+// NewOpenAIDallEWithOptions 创建可配置的 OpenAI DALL-E Provider。
+func NewOpenAIDallEWithOptions(apiKey, baseURL string, opts ...OpenAICompatOption) Provider {
 	if baseURL == "" {
 		baseURL = DefaultOpenAIBaseURL
 	}
-	return &openAICompatProvider{
+	p := &openAICompatProvider{
 		name:    "openai-dalle",
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
@@ -41,16 +51,28 @@ func NewOpenAIDallE(apiKey, baseURL string) Provider {
 		httpc:   http.DefaultClient,
 		timeout: 120 * time.Second, // 图像生成普遍较慢
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	p.tx = transport.NewTransport(p.httpc, p.policy)
+	return p
 }
 
 // NewZhipuCogView 创建智谱 CogView Provider（OpenAI 兼容协议）。
 //
 // 智谱端点：https://open.bigmodel.cn/api/paas/v4/images/generations
 func NewZhipuCogView(apiKey, baseURL string) Provider {
+	return NewZhipuCogViewWithOptions(apiKey, baseURL)
+}
+
+// NewZhipuCogViewWithOptions 创建可配置的智谱 CogView Provider。
+func NewZhipuCogViewWithOptions(apiKey, baseURL string, opts ...OpenAICompatOption) Provider {
 	if baseURL == "" {
 		baseURL = "https://open.bigmodel.cn/api/paas/v4"
 	}
-	return &openAICompatProvider{
+	p := &openAICompatProvider{
 		name:    "zhipu-cogview",
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
@@ -58,22 +80,57 @@ func NewZhipuCogView(apiKey, baseURL string) Provider {
 		httpc:   http.DefaultClient,
 		timeout: 120 * time.Second,
 	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	p.tx = transport.NewTransport(p.httpc, p.policy)
+	return p
 }
 
 // NewOpenAICompatible 通用 OpenAI Images 兼容 Provider（自托管 / 第三方）。
 //
 // modelIDs 用于 model→provider 反查路由。
 func NewOpenAICompatible(name, apiKey, baseURL string, modelIDs []string) Provider {
+	return NewOpenAICompatibleWithOptions(name, apiKey, baseURL, modelIDs)
+}
+
+// NewOpenAICompatibleWithOptions 创建可配置的通用 OpenAI Images 兼容 Provider。
+func NewOpenAICompatibleWithOptions(name, apiKey, baseURL string, modelIDs []string, opts ...OpenAICompatOption) Provider {
 	if baseURL == "" {
 		baseURL = DefaultOpenAIBaseURL
 	}
-	return &openAICompatProvider{
+	p := &openAICompatProvider{
 		name:    name,
 		baseURL: strings.TrimRight(baseURL, "/"),
 		apiKey:  apiKey,
 		models:  modelIDs,
 		httpc:   http.DefaultClient,
 		timeout: 120 * time.Second,
+	}
+	for _, opt := range opts {
+		if opt != nil {
+			opt(p)
+		}
+	}
+	p.tx = transport.NewTransport(p.httpc, p.policy)
+	return p
+}
+
+// OpenAICompatWithHTTPClient 注入自定义 HTTP client。
+func OpenAICompatWithHTTPClient(client *http.Client) OpenAICompatOption {
+	return func(p *openAICompatProvider) {
+		if client != nil {
+			p.httpc = client
+		}
+	}
+}
+
+// OpenAICompatWithNetworkPolicy 设置上游网络出口约束。
+func OpenAICompatWithNetworkPolicy(policy llm.NetworkPolicy) OpenAICompatOption {
+	return func(p *openAICompatProvider) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
 	}
 }
 
@@ -137,40 +194,30 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 		return nil, fmt.Errorf("marshal request: %w", err)
 	}
 
-	reqCtx, cancel := context.WithTimeout(ctx, p.timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost,
-		p.baseURL+"/images/generations", bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("build request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+p.apiKey)
-
 	start := time.Now()
-	resp, err := p.httpc.Do(httpReq)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  p.name,
+		Action:    "image.generate",
+		Method:    http.MethodPost,
+		URL:       p.baseURL + "/images/generations",
+		Body:      payload,
+		Client:    p.httpc,
+		Transport: p.tx,
+		Timeout:   p.timeout,
+		// 本 Provider 不向上游透传幂等键，计费型生成 POST 一律不重试。
+		Retry: media.SubmitRetryPolicy(""),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+p.apiKey)
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("call %s: %w", p.name, err)
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 64*1024*1024)) // 64MB 上限防 OOM
-	if err != nil {
-		return nil, fmt.Errorf("read response: %w", err)
-	}
-
-	if resp.StatusCode >= 400 {
-		// 尝试解析结构化错误
-		var errResp openAIImagesResponse
-		if json.Unmarshal(respBody, &errResp) == nil && errResp.Error != nil {
-			return nil, fmt.Errorf("%s HTTP %d: %s", p.name, resp.StatusCode, errResp.Error.Message)
-		}
-		return nil, fmt.Errorf("%s HTTP %d: %s", p.name, resp.StatusCode, truncateForError(string(respBody), 200))
-	}
-
 	var parsed openAIImagesResponse
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if parsed.Error != nil {
@@ -187,19 +234,11 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 	}
 
 	return &Result{
-		Provider: p.name,
-		Model:    model,
-		Created:  parsed.Created,
-		Images:   images,
-		UsageMs:  time.Since(start).Milliseconds(),
+		Provider:  p.name,
+		Model:     model,
+		Created:   parsed.Created,
+		Images:    images,
+		RequestID: resp.Header.Get("x-request-id"),
+		UsageMs:   time.Since(start).Milliseconds(),
 	}, nil
-}
-
-func truncateForError(s string, maxLen int) string {
-	// rune-safe 截断（委托 toolkit stringx.SubString），避免 CJK 字节切断产生乱码（BUG-20260625 F-4）。
-	head := stringx.SubString(s, 0, maxLen)
-	if head == s {
-		return s
-	}
-	return head + "..."
 }
