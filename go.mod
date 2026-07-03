@@ -1,10 +1,10 @@
 module github.com/hexagon-codes/ai-core
 
-go 1.25.5
+go 1.25.7
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/hexagon-codes/toolkit v0.2.3
+	github.com/hexagon-codes/toolkit v0.2.6
 	modernc.org/sqlite v1.52.0
 )
 

@@ -133,8 +133,8 @@ func TestBuildRequestBody_NumCtxFromMetadataAndModelContext(t *testing.T) {
 		t.Fatal(err)
 	}
 	var payload map[string]any
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(body, &payload); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	opts := payload["options"].(map[string]any)
 	if opts["num_ctx"].(float64) != maxAutomaticNumCtx {
@@ -149,8 +149,8 @@ func TestBuildRequestBody_NumCtxFromMetadataAndModelContext(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if err := json.Unmarshal(body, &payload); err != nil {
-		t.Fatal(err)
+	if unmarshalErr := json.Unmarshal(body, &payload); unmarshalErr != nil {
+		t.Fatal(unmarshalErr)
 	}
 	opts = payload["options"].(map[string]any)
 	if opts["num_ctx"].(float64) != 16384 {

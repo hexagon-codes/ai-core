@@ -316,7 +316,7 @@ multi := memory.NewMultiLayerMemory(
 | 豆包 | doubao-pro-*, doubao-lite-*, doubao-vision-pro-* | 流式、函数调用、视觉 |
 | Doubao / ModelArk 国内外 | doubao-seed-*, doubao-pro-*, BytePlus ModelArk endpoint | OpenAI-compatible、流式、函数调用、视觉、区域 profile |
 | 文心一言 | ernie-4.5-8k, ernie-4.0-8k, ernie-3.5-8k, ernie-x1 | 流式 |
-| Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | 流式、函数调用、视觉 |
+| Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | JSON Lines 流式、函数调用、视觉、模型能力发现 |
 | OpenAI-compatible 长尾 | OpenRouter、Groq、Together、Perplexity、xAI、Mistral、Fireworks、DeepInfra、SiliconFlow、Moonshot、Baichuan、StepFun | 统一 Complete / Stream / Embedding |
 
 ## 支持的媒体 Provider

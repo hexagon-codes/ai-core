@@ -15,7 +15,10 @@
 - 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
 - `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
 - `llm` 缓存默认 key 改为完整请求的稳定 JSON hash，覆盖 `MultiContent`、`Metadata`、tools、response format 等会影响上游语义的字段；不可序列化请求会跳过缓存读写，避免伪 key 漂移和缓存堆积。
+- `llm/ollama`：适配新版 Ollama 元数据与媒体能力，`/api/tags` 读取 `model`、`capabilities`、`context_length`，缺失能力时回退 `/api/show`；OpenAI 多模态 `image_url` 会转换为 Ollama `images` base64 数组；请求默认写入 `num_ctx`，并支持通过 metadata 覆盖。
+- `streamx`：`CustomFormat` 支持原始 JSON Lines 流，兼容 Ollama 等非 SSE 上游，同时保留 `data:` SSE 解析路径。
 - `media` 统一任务状态归一化，新增 `TaskCancelled`，`TaskState.Terminal()` 覆盖成功、失败和取消。
+- 依赖：`github.com/hexagon-codes/toolkit` v0.2.3 → v0.2.6；`go` 指令随 toolkit 要求提升至 1.25.7。
 
 ### Fixed
 - `streamx.Stream.Close`：先关闭底层 reader 再等待后台 goroutine，避免 processLoop 阻塞在读输入时 `Close()` 卡住；`Collect()` 在 chunk channel 关闭后补读一次错误通道，避免漏报末尾错误。

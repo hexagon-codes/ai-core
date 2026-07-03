@@ -318,7 +318,7 @@ multi := memory.NewMultiLayerMemory(
 | Doubao | doubao-pro-*, doubao-lite-*, doubao-vision-pro-* | Streaming, function calling, vision |
 | Doubao / ModelArk CN and global | doubao-seed-*, doubao-pro-*, BytePlus ModelArk endpoints | OpenAI-compatible, streaming, function calling, vision, regional profiles |
 | ERNIE | ernie-4.5-8k, ernie-4.0-8k, ernie-3.5-8k, ernie-x1 | Streaming |
-| Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | Streaming, function calling, vision |
+| Ollama | llama3.2, llama3.1, qwen2.5, mistral, codellama, llava | JSON Lines streaming, function calling, vision, model capability discovery |
 | Long-tail OpenAI-compatible | OpenRouter, Groq, Together, Perplexity, xAI, Mistral, Fireworks, DeepInfra, SiliconFlow, Moonshot, Baichuan, StepFun | Unified Complete / Stream / Embedding |
 
 ## Supported Media Providers

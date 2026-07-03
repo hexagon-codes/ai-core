@@ -268,7 +268,8 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 	}
 
 	models := make([]llm.ModelInfo, 0, len(result.Models))
-	for _, m := range result.Models {
+	for i := range result.Models {
+		m := &result.Models[i]
 		modelID := strings.TrimSpace(m.Name)
 		if modelID == "" {
 			modelID = strings.TrimSpace(m.Model)
@@ -307,7 +308,11 @@ func (p *Provider) fetchModelCapabilities(ctx context.Context, model string) ([]
 	if err != nil {
 		return nil, err
 	}
-	defer resp.Body.Close()
+	defer func() {
+		if closeErr := resp.Body.Close(); closeErr != nil {
+			return
+		}
+	}()
 
 	var result struct {
 		Capabilities []string `json:"capabilities"`
@@ -477,18 +482,28 @@ func convertMessagesForOllama(messages []llm.Message) ([]map[string]any, error) 
 		texts := make([]string, 0, len(contentParts))
 		images := make([]string, 0)
 		for _, part := range contentParts {
-			partType, _ := part["type"].(string)
+			partType, ok := part["type"].(string)
+			if !ok {
+				continue
+			}
 			switch partType {
 			case "image_url":
-				imageURL, _ := part["image_url"].(map[string]any)
-				rawURL, _ := imageURL["url"].(string)
+				imageURL, ok := part["image_url"].(map[string]any)
+				if !ok {
+					return nil, fmt.Errorf("ollama image_url part missing image_url")
+				}
+				rawURL, ok := imageURL["url"].(string)
+				if !ok {
+					return nil, fmt.Errorf("ollama image_url part missing url")
+				}
 				payload, err := ollamaImagePayload(rawURL)
 				if err != nil {
 					return nil, err
 				}
 				images = append(images, payload)
 			default:
-				if text, _ := part["text"].(string); text != "" {
+				text, ok := part["text"].(string)
+				if ok && text != "" {
 					texts = append(texts, text)
 				}
 			}
@@ -648,7 +663,10 @@ func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 		}
 	}
 	for i, tc := range resp.Message.ToolCalls {
-		args, _ := json.Marshal(tc.Function.Arguments)
+		args, err := json.Marshal(tc.Function.Arguments)
+		if err != nil {
+			return nil, err
+		}
 		chunk.ToolCalls = append(chunk.ToolCalls, streamx.ToolCall{
 			Index:     i,
 			ID:        fmt.Sprintf("call_%d", i),
