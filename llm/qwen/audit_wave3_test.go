@@ -19,6 +19,7 @@ package qwen
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -747,5 +748,21 @@ func TestWithBaseURL_TakesEffect(t *testing.T) {
 	}
 	if !hit {
 		t.Fatal("WithBaseURL 未生效，测试服务器未被命中")
+	}
+}
+
+func TestWithNetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	p := New("k",
+		WithBaseURL("http://127.0.0.1:1"),
+		WithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{llm.UserMessage("hi")},
+	})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
 	}
 }

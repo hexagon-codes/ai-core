@@ -3,10 +3,12 @@ package anthropic
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -54,7 +56,7 @@ func TestModels(t *testing.T) {
 
 func TestCountTokens(t *testing.T) {
 	n, err := New("k").CountTokens([]llm.Message{
-		{Role: llm.RoleUser, Content: "12345678"}, // 8/4=2
+		{Role: llm.RoleUser, Content: "12345678"},  // 8/4=2
 		{Role: llm.RoleAssistant, Content: "1234"}, // 4/4=1
 	})
 	if err != nil || n != 3 {
@@ -132,6 +134,11 @@ func TestBuildRequestBody_AllBranches(t *testing.T) {
 	if !ok || len(tools) != 1 {
 		t.Errorf("tools 未写入: %v", payload["tools"])
 	}
+	tool := tools[0].(map[string]any)
+	inputSchema, ok := tool["input_schema"].(map[string]any)
+	if !ok || inputSchema["type"] != "object" {
+		t.Fatalf("nil tool schema 应兜底为空 object, got %#v", tool["input_schema"])
+	}
 	msgs := payload["messages"].([]any)
 	if len(msgs) != 1 { // system 被分离，只剩 user
 		t.Errorf("messages 应只含 1 条 user, got %d", len(msgs))
@@ -154,6 +161,51 @@ func TestBuildRequestBody_DefaultMaxTokensNoSystem(t *testing.T) {
 	}
 	if _, ok := payload["system"]; ok {
 		t.Errorf("无 system 时不应有 system 字段")
+	}
+}
+
+func TestBuildRequestBody_MultiContent(t *testing.T) {
+	p := New("k")
+	body, _, err := p.buildRequestBody(llm.CompletionRequest{
+		Model: "claude-x",
+		Messages: []llm.Message{{
+			Role: llm.RoleUser,
+			MultiContent: []llm.ContentPart{
+				{Type: "image_url", ImageURL: &llm.ImageURL{URL: "https://example.com/a.png", Detail: "high"}},
+				{Type: "text", Text: "describe this"},
+				{Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,aGVsbG8="}},
+			},
+		}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	messages := payload["messages"].([]any)
+	content := messages[0].(map[string]any)["content"].([]any)
+	if len(content) != 3 {
+		t.Fatalf("expected 3 content blocks, got %#v", content)
+	}
+
+	urlBlock := content[0].(map[string]any)
+	urlSource := urlBlock["source"].(map[string]any)
+	if urlBlock["type"] != "image" || urlSource["type"] != "url" ||
+		urlSource["url"] != "https://example.com/a.png" {
+		t.Fatalf("URL image block not encoded for Anthropic: %#v", urlBlock)
+	}
+	textBlock := content[1].(map[string]any)
+	if textBlock["type"] != "text" || textBlock["text"] != "describe this" {
+		t.Fatalf("text block not encoded: %#v", textBlock)
+	}
+	base64Block := content[2].(map[string]any)
+	base64Source := base64Block["source"].(map[string]any)
+	if base64Block["type"] != "image" || base64Source["type"] != "base64" ||
+		base64Source["media_type"] != "image/png" || base64Source["data"] != "aGVsbG8=" {
+		t.Fatalf("base64 image block not encoded for Anthropic: %#v", base64Block)
 	}
 }
 
@@ -208,6 +260,80 @@ func TestComplete_ErrorStatus(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "rate limit") {
 		t.Fatalf("应返回含 body 的错误, got %v", err)
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("应返回 ProviderError 且带状态码, got %#v", err)
+	}
+}
+
+func TestComplete_WithHeadersAppliesOnlySafeOverrides(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("x-api-key"); got != "k" {
+			t.Fatalf("x-api-key = %q, want provider key", got)
+		}
+		if got := r.Header.Get("anthropic-version"); got != anthropicVersion {
+			t.Fatalf("anthropic-version = %q, want provider version", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type = %q, want provider content type", got)
+		}
+		if got := r.Header.Get("anthropic-beta"); got != "tools-2024-04-04" {
+			t.Fatalf("safe anthropic-beta header missing, got %q", got)
+		}
+		if got := r.Header.Get("X-Debug-Trace"); got != "trace-1" {
+			t.Fatalf("safe custom header missing, got %q", got)
+		}
+		_, _ = w.Write([]byte(`{"id":"msg_1","model":"claude-x","stop_reason":"end_turn",
+			"content":[{"type":"text","text":"ok"}],
+			"usage":{"input_tokens":1,"output_tokens":1}}`))
+	}))
+	defer srv.Close()
+
+	p := New("k",
+		WithBaseURL(srv.URL),
+		WithHeaders(map[string]string{
+			"x-api-key":         "attacker-key",
+			"anthropic-version": "2099-01-01",
+			"Content-Type":      "text/plain",
+			"anthropic-beta":    "tools-2024-04-04",
+			"X-Debug-Trace":     "trace-1",
+		}),
+	)
+	resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "ok" {
+		t.Fatalf("响应解析错误: %+v", resp)
+	}
+}
+
+func TestComplete_WithNetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"id":"msg_1","content":[{"type":"text","text":"ok"}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := New("k",
+		WithBaseURL(srv.URL),
+		WithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	).Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected network policy error")
+	}
+	if called {
+		t.Fatal("request should be blocked before reaching local server")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || !strings.Contains(providerErr.Cause.Error(), "private/internal") {
+		t.Fatalf("expected private host ProviderError, got %T %[1]v", err)
 	}
 }
 
@@ -269,5 +395,44 @@ func TestStream_SuccessAndError(t *testing.T) {
 	})
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("流式错误状态应返回错误, got %v", err)
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("流式错误应返回 ProviderError 且带状态码, got %#v", err)
+	}
+}
+
+func TestStream_IdleTimeoutPropagatesProviderError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		time.Sleep(80 * time.Millisecond)
+		_, _ = w.Write([]byte("event: content_block_delta\ndata: {\"type\":\"content_block_delta\",\"delta\":{\"type\":\"text_delta\",\"text\":\"late\"}}\n\n"))
+	}))
+	defer srv.Close()
+
+	s, err := New("k", WithBaseURL(srv.URL), WithStreamIdleTimeout(10*time.Millisecond)).
+		Stream(context.Background(), llm.CompletionRequest{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.Collect()
+	if err == nil {
+		t.Fatal("expected stream idle timeout")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Action != "stream.stream_read" {
+		t.Fatalf("expected stream read ProviderError, got %T %[1]v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded cause, got %v", err)
 	}
 }

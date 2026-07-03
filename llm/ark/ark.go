@@ -20,11 +20,8 @@
 package ark
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
@@ -32,6 +29,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -48,6 +46,8 @@ type Provider struct {
 	model      string
 	endpointID string // 火山引擎的端点 ID (可选)
 	httpClient *http.Client
+	policy     *llm.NetworkPolicy
+	transport  *transport.Transport
 }
 
 // Option 是 Provider 的配置选项
@@ -82,6 +82,13 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithNetworkPolicy 设置上游网络出口约束。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建豆包 Provider
 // apiKey 可以为空，会从环境变量 ARK_API_KEY 或 VOLC_ACCESSKEY 读取
 func New(apiKey string, opts ...Option) *Provider {
@@ -107,6 +114,7 @@ func New(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.policy)
 
 	return p
 }
@@ -127,26 +135,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "complete", "/chat/completions", body)
 	if err != nil {
 		return nil, err
 	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("ark request failed: %w", err)
-	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("ark api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("ark api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result arkResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -167,25 +160,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "stream", "/chat/completions", body)
 	if err != nil {
 		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("ark request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("ark api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("ark api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	// 豆包使用 OpenAI 兼容格式
@@ -277,6 +254,19 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+}
+
+func (p *Provider) doRequest(ctx context.Context, action, path string, body []byte) (*http.Response, error) {
+	return transport.Do(ctx, transport.Request{
+		Provider:   "ark",
+		Action:     action,
+		Method:     http.MethodPost,
+		URL:        p.baseURL + path,
+		Body:       body,
+		Client:     p.httpClient,
+		Transport:  p.transport,
+		SetHeaders: p.setHeaders,
+	})
 }
 
 // buildRequestBody 构建请求体

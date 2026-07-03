@@ -2,17 +2,17 @@
 package anthropic
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -24,10 +24,15 @@ const (
 
 // Provider 实现 Anthropic Claude LLM 提供者
 type Provider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	httpClient *http.Client
+	apiKey         string
+	baseURL        string
+	model          string
+	httpClient     *http.Client
+	requestTimeout time.Duration
+	streamIdle     time.Duration
+	headers        map[string]string
+	networkPolicy  *llm.NetworkPolicy
+	transport      *transport.Transport
 }
 
 // Option 是 Provider 的配置选项
@@ -54,6 +59,38 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithRequestTimeout 设置单次上游请求超时。
+//
+// 默认不设置请求级总超时，沿用调用方 context；流式请求如果设置该值，也会受该超时约束。
+func WithRequestTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.requestTimeout = timeout
+	}
+}
+
+// WithStreamIdleTimeout 设置流式响应单次读取空闲超时。
+//
+// 默认不设置，适合可能长时间思考才输出的模型；需要防止静默卡死时显式启用。
+func WithStreamIdleTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.streamIdle = timeout
+	}
+}
+
+// WithHeaders 设置额外请求头。认证和传输级 header 会被共享 transport 拒绝覆盖。
+func WithHeaders(headers map[string]string) Option {
+	return func(p *Provider) {
+		p.headers = transport.CloneHeaders(headers)
+	}
+}
+
+// WithNetworkPolicy 设置上游网络出口约束。默认不启用，保持本地网关/测试兼容。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.networkPolicy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建 Anthropic Provider
 // apiKey 可以为空，会从环境变量 ANTHROPIC_API_KEY 读取
 func New(apiKey string, opts ...Option) *Provider {
@@ -74,6 +111,7 @@ func New(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.networkPolicy)
 
 	return p
 }
@@ -94,26 +132,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/messages", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "complete", "/messages", body)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("anthropic api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("anthropic api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result anthropicResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -134,25 +157,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/messages", bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "stream", "/messages", body)
 	if err != nil {
 		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("anthropic api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("anthropic api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.ClaudeFormat), nil
@@ -226,6 +233,27 @@ func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("anthropic-version", anthropicVersion)
 }
 
+func (p *Provider) doRequest(ctx context.Context, action, path string, body []byte) (*http.Response, error) {
+	streamIdle := time.Duration(0)
+	if action == "stream" {
+		streamIdle = p.streamIdle
+	}
+	return transport.Do(ctx, transport.Request{
+		Provider:      "anthropic",
+		Action:        action,
+		Method:        http.MethodPost,
+		URL:           p.baseURL + path,
+		Body:          body,
+		Client:        p.httpClient,
+		Transport:     p.transport,
+		SetHeaders:    p.setHeaders,
+		Headers:       p.headers,
+		NetworkPolicy: p.networkPolicy,
+		Timeout:       p.requestTimeout,
+		StreamIdle:    streamIdle,
+	})
+}
+
 // buildRequestBody 构建请求体
 // Anthropic 的 API 格式与 OpenAI 不同，需要特殊处理
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, string, error) {
@@ -244,10 +272,11 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 			"role": convertRole(msg.Role),
 		}
 
-		// Anthropic 使用 content 数组
-		m["content"] = []map[string]any{
-			{"type": "text", "text": msg.Content},
+		content, err := anthropicMessageContent(msg)
+		if err != nil {
+			return nil, systemPrompt, err
 		}
+		m["content"] = content
 
 		messages = append(messages, m)
 	}
@@ -282,7 +311,7 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 			tools[i] = map[string]any{
 				"name":         tool.Function.Name,
 				"description":  tool.Function.Description,
-				"input_schema": tool.Function.Parameters,
+				"input_schema": anthropicInputSchema(tool.Function.Parameters),
 			}
 		}
 		payload["tools"] = tools
@@ -290,6 +319,99 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 
 	body, err := json.Marshal(payload)
 	return body, systemPrompt, err
+}
+
+func anthropicMessageContent(msg llm.Message) ([]map[string]any, error) {
+	if !msg.HasMultiContent() {
+		return []map[string]any{
+			{"type": "text", "text": msg.Content},
+		}, nil
+	}
+
+	blocks := make([]map[string]any, 0, len(msg.MultiContent))
+	for _, part := range msg.MultiContent {
+		switch part.Type {
+		case "", "text":
+			blocks = append(blocks, map[string]any{
+				"type": "text",
+				"text": part.Text,
+			})
+		case "image_url":
+			if part.ImageURL == nil || strings.TrimSpace(part.ImageURL.URL) == "" {
+				return nil, fmt.Errorf("anthropic image content missing image_url")
+			}
+			source, err := anthropicImageSource(part.ImageURL.URL)
+			if err != nil {
+				return nil, err
+			}
+			blocks = append(blocks, map[string]any{
+				"type":   "image",
+				"source": source,
+			})
+		default:
+			blocks = append(blocks, map[string]any{
+				"type": "text",
+				"text": part.Text,
+			})
+		}
+	}
+	return blocks, nil
+}
+
+func anthropicImageSource(rawURL string) (map[string]any, error) {
+	rawURL = strings.TrimSpace(rawURL)
+	if !strings.HasPrefix(strings.ToLower(rawURL), "data:") {
+		return map[string]any{
+			"type": "url",
+			"url":  rawURL,
+		}, nil
+	}
+
+	payload := rawURL[len("data:"):]
+	header, data, ok := strings.Cut(payload, ",")
+	if !ok || strings.TrimSpace(data) == "" {
+		return nil, fmt.Errorf("anthropic image data URI missing base64 data")
+	}
+	parts := strings.Split(header, ";")
+	mediaType := strings.ToLower(strings.TrimSpace(parts[0]))
+	if !anthropicSupportedImageMediaType(mediaType) {
+		return nil, fmt.Errorf("anthropic image media type %q is not supported", mediaType)
+	}
+	hasBase64 := false
+	for _, part := range parts[1:] {
+		if strings.EqualFold(strings.TrimSpace(part), "base64") {
+			hasBase64 = true
+			break
+		}
+	}
+	if !hasBase64 {
+		return nil, fmt.Errorf("anthropic image data URI must be base64 encoded")
+	}
+
+	return map[string]any{
+		"type":       "base64",
+		"media_type": mediaType,
+		"data":       data,
+	}, nil
+}
+
+func anthropicSupportedImageMediaType(mediaType string) bool {
+	switch mediaType {
+	case "image/jpeg", "image/png", "image/gif", "image/webp":
+		return true
+	default:
+		return false
+	}
+}
+
+func anthropicInputSchema(schema *llm.Schema) any {
+	if schema == nil {
+		return map[string]any{
+			"type":       "object",
+			"properties": map[string]any{},
+		}
+	}
+	return schema
 }
 
 // convertRole 转换角色名称

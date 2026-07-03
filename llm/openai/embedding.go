@@ -1,12 +1,10 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
-	"io"
-	"net/http"
 	"sort"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -83,29 +81,13 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 		return nil, fmt.Errorf("序列化 embedding 请求失败: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/embeddings", bytes.NewReader(body))
+	result, err := doJSONWithDecodeRetry[embeddingResponse](ctx, p, "embedding", "/embeddings", body)
 	if err != nil {
-		return nil, err
-	}
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, fmt.Errorf("embedding 请求失败: %w", err)
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("openai embedding api error: %s (failed to read body: %v)", resp.Status, readErr)
+		var decodeErr *responseDecodeError
+		if errors.As(err, &decodeErr) {
+			return nil, fmt.Errorf("解析 embedding 响应失败: %w", decodeErr.Err)
 		}
-		return nil, fmt.Errorf("openai embedding api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	var result embeddingResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, fmt.Errorf("解析 embedding 响应失败: %w", err)
+		return nil, fmt.Errorf("embedding 请求失败: %w", err)
 	}
 
 	// API 返回结果可能乱序，按 index 排序

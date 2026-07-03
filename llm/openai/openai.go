@@ -2,17 +2,18 @@
 package openai
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
+	"errors"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -24,10 +25,15 @@ const (
 
 // Provider 实现 OpenAI LLM 提供者
 type Provider struct {
-	apiKey     string
-	baseURL    string
-	model      string
-	httpClient *http.Client
+	apiKey         string
+	baseURL        string
+	model          string
+	httpClient     *http.Client
+	requestTimeout time.Duration
+	streamIdle     time.Duration
+	headers        map[string]string
+	networkPolicy  *llm.NetworkPolicy
+	transport      *transport.Transport
 }
 
 // Option 是 Provider 的配置选项
@@ -54,6 +60,38 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithRequestTimeout 设置单次上游请求超时。
+//
+// 默认不设置请求级总超时，沿用调用方 context；流式请求如果设置该值，也会受该超时约束。
+func WithRequestTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.requestTimeout = timeout
+	}
+}
+
+// WithStreamIdleTimeout 设置流式响应单次读取空闲超时。
+//
+// 默认不设置，适合可能长时间思考才输出的模型；需要防止静默卡死时显式启用。
+func WithStreamIdleTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		p.streamIdle = timeout
+	}
+}
+
+// WithHeaders 设置额外请求头。认证和传输级 header 会被共享 transport 拒绝覆盖。
+func WithHeaders(headers map[string]string) Option {
+	return func(p *Provider) {
+		p.headers = transport.CloneHeaders(headers)
+	}
+}
+
+// WithNetworkPolicy 设置上游网络出口约束。默认不启用，保持本地网关/测试兼容。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.networkPolicy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建 OpenAI Provider
 // apiKey 可以为空，会从环境变量 OPENAI_API_KEY 读取
 func New(apiKey string, opts ...Option) *Provider {
@@ -74,6 +112,7 @@ func New(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.networkPolicy)
 
 	return p
 }
@@ -94,56 +133,18 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	result, err := doJSONWithDecodeRetry[openAIResponse](ctx, p, "complete", "/chat/completions", body)
 	if err != nil {
-		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		logger.WarnContext(ctx, "openai http request failed",
-			logger.Component("openai"),
-			logger.Action("complete"),
-			logger.String("model", req.Model),
-			logger.String("base_url", p.baseURL),
-			logger.Err(err),
-		)
-		return nil, err
-	}
-	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			logger.ErrorContext(ctx, "openai api error and body read failed",
+		var decodeErr *responseDecodeError
+		if errors.As(err, &decodeErr) {
+			logger.WarnContext(ctx, "openai response json decode failed",
 				logger.Component("openai"),
 				logger.Action("complete"),
 				logger.String("model", req.Model),
-				logger.Status(resp.StatusCode),
-				logger.Err(readErr),
+				logger.Err(decodeErr.Err),
 			)
-			return nil, fmt.Errorf("openai api error: %s (failed to read body: %v)", resp.Status, readErr)
+			return nil, decodeErr.Err
 		}
-		logger.ErrorContext(ctx, "openai api non-2xx response",
-			logger.Component("openai"),
-			logger.Action("complete"),
-			logger.String("model", req.Model),
-			logger.Status(resp.StatusCode),
-			logger.String("body", string(bodyBytes)),
-		)
-		return nil, fmt.Errorf("openai api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
-
-	var result openAIResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		logger.WarnContext(ctx, "openai response json decode failed",
-			logger.Component("openai"),
-			logger.Action("complete"),
-			logger.String("model", req.Model),
-			logger.Err(err),
-		)
 		return nil, err
 	}
 
@@ -161,46 +162,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "stream", "/chat/completions", body)
 	if err != nil {
 		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		logger.WarnContext(ctx, "openai stream http request failed",
-			logger.Component("openai"),
-			logger.Action("stream"),
-			logger.String("model", req.Model),
-			logger.String("base_url", p.baseURL),
-			logger.Err(err),
-		)
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			logger.ErrorContext(ctx, "openai stream api error and body read failed",
-				logger.Component("openai"),
-				logger.Action("stream"),
-				logger.String("model", req.Model),
-				logger.Status(resp.StatusCode),
-				logger.Err(readErr),
-			)
-			return nil, fmt.Errorf("openai api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		logger.ErrorContext(ctx, "openai stream api non-2xx response",
-			logger.Component("openai"),
-			logger.Action("stream"),
-			logger.String("model", req.Model),
-			logger.Status(resp.StatusCode),
-			logger.String("body", string(bodyBytes)),
-		)
-		return nil, fmt.Errorf("openai api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat), nil
@@ -273,6 +237,120 @@ func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
 }
 
+func (p *Provider) doRequest(ctx context.Context, action, path string, body []byte) (*http.Response, error) {
+	streamIdle := time.Duration(0)
+	if action == "stream" {
+		streamIdle = p.streamIdle
+	}
+	return transport.Do(ctx, transport.Request{
+		Provider:      "openai",
+		Action:        action,
+		Method:        http.MethodPost,
+		URL:           p.baseURL + path,
+		Body:          body,
+		Client:        p.httpClient,
+		Transport:     p.transport,
+		SetHeaders:    p.setHeaders,
+		Headers:       p.headers,
+		NetworkPolicy: p.networkPolicy,
+		Timeout:       p.requestTimeout,
+		StreamIdle:    streamIdle,
+	})
+}
+
+type responseDecodeError struct {
+	Err error
+}
+
+func (e *responseDecodeError) Error() string {
+	if e == nil || e.Err == nil {
+		return ""
+	}
+	return e.Err.Error()
+}
+
+func (e *responseDecodeError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path string, body []byte) (T, error) {
+	var zero T
+	policy := transport.DefaultRetryPolicy()
+	for attempt := 1; ; attempt++ {
+		resp, err := p.doRequest(ctx, action, path, body)
+		if err != nil {
+			return zero, err
+		}
+
+		var result T
+		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
+		if closeErr := resp.Body.Close(); decodeErr == nil && closeErr != nil {
+			decodeErr = closeErr
+		}
+		if decodeErr == nil {
+			return result, nil
+		}
+		if attempt >= policy.MaxAttempts || !isRetryableResponseDecodeError(ctx, decodeErr) {
+			return zero, &responseDecodeError{Err: decodeErr}
+		}
+		if err := waitForDecodeRetry(ctx, decodeRetryDelay(policy, attempt)); err != nil {
+			return zero, err
+		}
+	}
+}
+
+func isRetryableResponseDecodeError(ctx context.Context, err error) bool {
+	if err == nil {
+		return false
+	}
+	if ctx != nil && ctx.Err() != nil {
+		return false
+	}
+	if errors.Is(err, io.ErrUnexpectedEOF) {
+		return true
+	}
+	return strings.Contains(strings.ToLower(err.Error()), "unexpected eof")
+}
+
+func decodeRetryDelay(policy transport.RetryPolicy, attempt int) time.Duration {
+	delay := policy.BaseDelay
+	for i := 1; i < attempt; i++ {
+		delay = time.Duration(float64(delay) * policy.Multiplier)
+		if delay >= policy.MaxDelay {
+			return policy.MaxDelay
+		}
+	}
+	if delay > policy.MaxDelay {
+		return policy.MaxDelay
+	}
+	return delay
+}
+
+func waitForDecodeRetry(ctx context.Context, delay time.Duration) error {
+	if delay <= 0 {
+		if ctx == nil {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			return nil
+		}
+	}
+	timer := time.NewTimer(delay)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
+}
+
 // buildRequestBody 构建请求体
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, error) {
 	payload := map[string]any{
@@ -302,6 +380,9 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if req.User != "" {
 		payload["user"] = req.User
 	}
+	if thinking, ok := openAIEnableThinkingFromMetadata(req.Metadata); ok && supportsEnableThinking(p.baseURL) {
+		payload["enable_thinking"] = thinking
+	}
 
 	// ResponseFormat 支持
 	if req.ResponseFormat != nil {
@@ -327,6 +408,37 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	}
 
 	return json.Marshal(payload)
+}
+
+func openAIEnableThinkingFromMetadata(metadata map[string]any) (bool, bool) {
+	if len(metadata) == 0 {
+		return false, false
+	}
+	for _, key := range []string{"enable_thinking", "thinking", "think"} {
+		value, exists := metadata[key]
+		if !exists {
+			continue
+		}
+		switch v := value.(type) {
+		case bool:
+			return v, true
+		case string:
+			switch strings.ToLower(strings.TrimSpace(v)) {
+			case "on", "true", "1", "yes", "enabled":
+				return true, true
+			case "off", "false", "0", "no", "disabled":
+				return false, true
+			}
+		}
+	}
+	return false, false
+}
+
+func supportsEnableThinking(baseURL string) bool {
+	base := strings.ToLower(baseURL)
+	return strings.Contains(base, "siliconflow") ||
+		strings.Contains(base, "dashscope") ||
+		strings.Contains(base, "aliyuncs")
 }
 
 // convertMessages 兼容内部老调用点，转发到 ConvertMessages。

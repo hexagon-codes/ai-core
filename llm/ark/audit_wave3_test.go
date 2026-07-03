@@ -15,6 +15,7 @@ package ark
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -166,6 +167,22 @@ func TestWithBaseURL_TakesEffect(t *testing.T) {
 	p := New("k", WithBaseURL(want))
 	if got := readUnexportedString(t, p, "baseURL"); got != want {
 		t.Fatalf("WithBaseURL(%q) 后 baseURL = %q, 期望 %q", want, got, want)
+	}
+}
+
+func TestWithNetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	p := New("k",
+		WithBaseURL("http://127.0.0.1:1"),
+		WithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{llm.UserMessage("hi")},
+	})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
 	}
 }
 
@@ -364,13 +381,13 @@ func TestComplete_RequestFieldsOmission(t *testing.T) {
 		{
 			name: "全部可选字段设置",
 			req: llm.CompletionRequest{
-				Messages:    []llm.Message{llm.UserMessage("a")},
-				MaxTokens:   100,
-				Temperature: &temp,
-				TopP:        &topP,
-				Stop:        []string{"END"},
-				Tools:       []llm.ToolDefinition{llm.NewToolDefinition("f", "d", nil)},
-				ToolChoice:  "auto",
+				Messages:       []llm.Message{llm.UserMessage("a")},
+				MaxTokens:      100,
+				Temperature:    &temp,
+				TopP:           &topP,
+				Stop:           []string{"END"},
+				Tools:          []llm.ToolDefinition{llm.NewToolDefinition("f", "d", nil)},
+				ToolChoice:     "auto",
 				ResponseFormat: &llm.ResponseFormat{Type: "json_object"},
 			},
 			present: []string{"max_tokens", "temperature", "top_p", "stop", "tools", "tool_choice", "response_format"},

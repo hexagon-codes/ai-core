@@ -3,10 +3,15 @@ package openai
 import (
 	"context"
 	"encoding/json"
+	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -62,7 +67,7 @@ func TestModels(t *testing.T) {
 func TestCountTokens(t *testing.T) {
 	n, err := New("k").CountTokens([]llm.Message{
 		{Role: llm.RoleUser, Content: "12345678"},  // 8/4=2
-		{Role: llm.RoleAssistant, Content: "1234"},  // 4/4=1
+		{Role: llm.RoleAssistant, Content: "1234"}, // 4/4=1
 	})
 	if err != nil || n != 3 {
 		t.Fatalf("CountTokens = %d,%v want 3,nil", n, err)
@@ -171,6 +176,48 @@ func TestBuildRequestBody_ResponseFormatJSONObject(t *testing.T) {
 	rf, ok := payload["response_format"].(map[string]any)
 	if !ok || rf["type"] != "json_object" {
 		t.Fatalf("json_object 未写入: %v", payload["response_format"])
+	}
+}
+
+func TestBuildRequestBody_SiliconFlowEnableThinkingFromMetadata(t *testing.T) {
+	p := New("k", WithBaseURL("https://api.siliconflow.cn/v1"))
+	body, err := p.buildRequestBody(llm.CompletionRequest{
+		Model:    "Qwen/Qwen3.6-35B-A3B",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"thinking": "off"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := payload["enable_thinking"].(bool)
+	if !ok {
+		t.Fatalf("enable_thinking type = %T, want bool; payload=%v", payload["enable_thinking"], payload)
+	}
+	if got {
+		t.Fatalf("enable_thinking = true, want false")
+	}
+}
+
+func TestBuildRequestBody_DefaultOpenAIDoesNotSendEnableThinking(t *testing.T) {
+	p := New("k")
+	body, err := p.buildRequestBody(llm.CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"thinking": "off"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["enable_thinking"]; ok {
+		t.Fatalf("default OpenAI payload must not include enable_thinking: %v", payload)
 	}
 }
 
@@ -469,6 +516,111 @@ func TestComplete_ErrorStatus(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "rate limit") {
 		t.Fatalf("应返回含 body 的错误, got %v", err)
 	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusTooManyRequests {
+		t.Fatalf("应返回 ProviderError 且带状态码, got %#v", err)
+	}
+}
+
+func TestComplete_WithHeadersAppliesOnlySafeOverrides(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if got := r.Header.Get("Authorization"); got != "Bearer k" {
+			t.Fatalf("Authorization = %q, want provider key", got)
+		}
+		if got := r.Header.Get("Content-Type"); got != "application/json" {
+			t.Fatalf("Content-Type = %q, want provider content type", got)
+		}
+		if got := r.Header.Get("X-Debug-Trace"); got != "trace-1" {
+			t.Fatalf("safe custom header missing, got %q", got)
+		}
+		_, _ = w.Write([]byte(`{"id":"id_1","model":"gpt-x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	p := New("k",
+		WithBaseURL(srv.URL),
+		WithHeaders(map[string]string{
+			"Authorization": "Bearer attacker",
+			"Content-Type":  "text/plain",
+			"X-Debug-Trace": "trace-1",
+		}),
+	)
+	resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Content != "ok" {
+		t.Fatalf("响应解析错误: %+v", resp)
+	}
+}
+
+func TestComplete_WithNetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	called := false
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		_, _ = w.Write([]byte(`{"id":"id_1","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	_, err := New("k",
+		WithBaseURL(srv.URL),
+		WithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	).Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("expected network policy error")
+	}
+	if called {
+		t.Fatal("request should be blocked before reaching local server")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || !strings.Contains(providerErr.Cause.Error(), "private/internal") {
+		t.Fatalf("expected private host ProviderError, got %T %[1]v", err)
+	}
+}
+
+func TestComplete_WithNetworkPolicyReusesGuardedTransport(t *testing.T) {
+	var dials atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, _ = io.Copy(io.Discard, r.Body)
+		_, _ = w.Write([]byte(`{"id":"id_1","model":"gpt-x","choices":[{"message":{"content":"ok"}}]}`))
+	}))
+	defer srv.Close()
+
+	client := &http.Client{
+		Transport: &http.Transport{
+			DialContext: func(ctx context.Context, network, _ string) (net.Conn, error) {
+				dials.Add(1)
+				return (&net.Dialer{}).DialContext(ctx, network, srv.Listener.Addr().String())
+			},
+		},
+	}
+
+	p := New("k",
+		WithBaseURL("http://example.com/v1"),
+		WithHTTPClient(client),
+		WithNetworkPolicy(llm.NetworkPolicy{
+			AllowHTTP:    true,
+			AllowPrivate: true,
+		}),
+	)
+	for i := 0; i < 2; i++ {
+		resp, err := p.Complete(context.Background(), llm.CompletionRequest{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if resp.Content != "ok" {
+			t.Fatalf("响应解析错误: %+v", resp)
+		}
+	}
+	if got := dials.Load(); got != 1 {
+		t.Fatalf("guarded transport should preserve keep-alive reuse, got %d dials", got)
+	}
 }
 
 func TestComplete_MalformedJSON(t *testing.T) {
@@ -481,6 +633,31 @@ func TestComplete_MalformedJSON(t *testing.T) {
 	})
 	if err == nil {
 		t.Fatal("畸形 JSON 应返回解析错误")
+	}
+}
+
+func TestComplete_RetriesUnexpectedEOFAfterHTTP200(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"choices":[`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"id":"ok","model":"m","choices":[{"message":{"role":"assistant","content":"recovered"},"finish_reason":"stop"}]}`))
+	}))
+	defer srv.Close()
+
+	resp, err := New("k", WithBaseURL(srv.URL)).Complete(context.Background(), llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err != nil {
+		t.Fatalf("截断响应应重试后成功，got err=%v", err)
+	}
+	if resp.Content != "recovered" {
+		t.Fatalf("content = %q, want recovered", resp.Content)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls = %d, want 2", calls.Load())
 	}
 }
 
@@ -551,6 +728,10 @@ func TestStream_ErrorStatus(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "boom") {
 		t.Fatalf("流式错误状态应返回错误, got %v", err)
 	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusInternalServerError {
+		t.Fatalf("流式错误应返回 ProviderError 且带状态码, got %#v", err)
+	}
 }
 
 func TestStream_RequestBuildAndDoErrors(t *testing.T) {
@@ -564,6 +745,41 @@ func TestStream_RequestBuildAndDoErrors(t *testing.T) {
 	down := New("k", WithBaseURL("http://127.0.0.1:1"))
 	if _, err := down.Stream(context.Background(), req); err == nil {
 		t.Error("Stream 不可达上游应报错")
+	}
+}
+
+func TestStream_IdleTimeoutPropagatesProviderError(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		flusher, ok := w.(http.Flusher)
+		if !ok {
+			t.Fatal("expected flusher")
+		}
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(http.StatusOK)
+		flusher.Flush()
+		time.Sleep(80 * time.Millisecond)
+		_, _ = w.Write([]byte("data: late\n\n"))
+	}))
+	defer srv.Close()
+
+	s, err := New("k", WithBaseURL(srv.URL), WithStreamIdleTimeout(10*time.Millisecond)).
+		Stream(context.Background(), llm.CompletionRequest{
+			Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	_, err = s.Collect()
+	if err == nil {
+		t.Fatal("expected stream idle timeout")
+	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.Action != "stream.stream_read" {
+		t.Fatalf("expected stream read ProviderError, got %T %[1]v", err)
+	}
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("expected DeadlineExceeded cause, got %v", err)
 	}
 }
 
@@ -660,6 +876,10 @@ func TestEmbed_ErrorStatus(t *testing.T) {
 	if err == nil || !strings.Contains(err.Error(), "bad embed") {
 		t.Fatalf("embedding 错误状态应返回含 body 的错误, got %v", err)
 	}
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) || providerErr.StatusCode != http.StatusBadRequest {
+		t.Fatalf("embedding 错误应返回 ProviderError 且带状态码, got %#v", err)
+	}
 }
 
 func TestEmbed_MalformedJSON(t *testing.T) {
@@ -670,6 +890,29 @@ func TestEmbed_MalformedJSON(t *testing.T) {
 	_, err := New("k", WithBaseURL(srv.URL)).Embed(context.Background(), []string{"x"})
 	if err == nil || !strings.Contains(err.Error(), "解析 embedding 响应失败") {
 		t.Fatalf("畸形 JSON 应返回解析错误, got %v", err)
+	}
+}
+
+func TestEmbed_RetriesUnexpectedEOFAfterHTTP200(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if calls.Add(1) == 1 {
+			_, _ = w.Write([]byte(`{"data":[`))
+			return
+		}
+		_, _ = w.Write([]byte(`{"data":[{"index":0,"embedding":[0.1,0.2]}]}`))
+	}))
+	defer srv.Close()
+
+	vecs, err := New("k", WithBaseURL(srv.URL)).EmbedWithModel(context.Background(), "m", []string{"x"})
+	if err != nil {
+		t.Fatalf("截断 embedding 响应应重试后成功，got err=%v", err)
+	}
+	if len(vecs) != 1 || len(vecs[0]) != 2 {
+		t.Fatalf("embedding 解析错误: %#v", vecs)
+	}
+	if calls.Load() != 2 {
+		t.Fatalf("calls = %d, want 2", calls.Load())
 	}
 }
 

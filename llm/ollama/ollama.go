@@ -2,11 +2,9 @@
 package ollama
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -28,6 +27,8 @@ type Provider struct {
 	baseURL    string
 	model      string
 	httpClient *http.Client
+	transport  *transport.Transport
+	policy     *llm.NetworkPolicy
 	models     []llm.ModelInfo // 缓存的模型列表
 }
 
@@ -55,8 +56,18 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithNetworkPolicy 设置上游网络出口约束。
+//
+// Ollama 默认允许本地 HTTP/私网访问；传入该选项可收紧到调用方指定策略。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建 Ollama Provider
 func New(opts ...Option) *Provider {
+	defaultPolicy := llm.NetworkPolicy{AllowHTTP: true, AllowPrivate: true}
 	p := &Provider{
 		baseURL: defaultBaseURL,
 		model:   defaultModel,
@@ -64,6 +75,7 @@ func New(opts ...Option) *Provider {
 		// http.Client.Timeout 对流式响应会在整个读取期间生效，
 		// 本地模型推理可能需要数分钟
 		httpClient: httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		policy:     &defaultPolicy,
 	}
 
 	// 从环境变量读取
@@ -77,6 +89,7 @@ func New(opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.policy)
 
 	return p
 }
@@ -97,26 +110,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/chat", body, false)
 	if err != nil {
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("ollama api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("ollama api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result ollamaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -137,25 +135,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/chat", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/chat", body, true)
 	if err != nil {
 		return nil, fmt.Errorf("ollama request failed: %w", err)
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("ollama api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("ollama api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	// Ollama 使用类似 OpenAI 的格式，但需要自定义解析
@@ -246,7 +228,7 @@ func (p *Provider) Models() []llm.ModelInfo {
 
 // fetchLocalModels 从 Ollama 获取本地模型列表
 func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
-	resp, err := p.httpClient.Get(p.baseURL + "/api/tags")
+	resp, err := p.doRequest(context.Background(), http.MethodGet, p.baseURL+"/api/tags", nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -421,20 +403,11 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 
 // Ping 检查 Ollama 服务是否可用
 func (p *Provider) Ping(ctx context.Context) error {
-	req, err := http.NewRequestWithContext(ctx, "GET", p.baseURL+"/api/tags", nil)
-	if err != nil {
-		return err
-	}
-
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.doRequest(ctx, http.MethodGet, p.baseURL+"/api/tags", nil, false)
 	if err != nil {
 		return fmt.Errorf("ollama service unavailable: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("ollama service returned status: %d", resp.StatusCode)
-	}
 
 	return nil
 }
@@ -447,27 +420,34 @@ func (p *Provider) PullModel(ctx context.Context, model string) error {
 	}
 	body, _ := json.Marshal(payload)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/pull", bytes.NewReader(body))
-	if err != nil {
-		return err
-	}
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(req)
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/pull", body, false)
 	if err != nil {
 		return fmt.Errorf("pull model failed: %w", err)
 	}
 	defer resp.Body.Close()
 
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return fmt.Errorf("pull model failed: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return fmt.Errorf("pull model failed: %s", string(bodyBytes))
-	}
-
 	return nil
+}
+
+func (p *Provider) doRequest(ctx context.Context, method, url string, body []byte, stream bool) (*http.Response, error) {
+	cfg := transport.Request{
+		Provider:  p.Name(),
+		Action:    strings.TrimPrefix(strings.TrimPrefix(url, strings.TrimRight(p.baseURL, "/")), "/"),
+		Method:    method,
+		URL:       url,
+		Body:      body,
+		Client:    p.httpClient,
+		Transport: p.transport,
+	}
+	if body != nil {
+		cfg.SetHeaders = func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+		}
+	}
+	if stream {
+		cfg.StreamIdle = 10 * time.Minute
+	}
+	return transport.Do(ctx, cfg)
 }
 
 // 确保实现了 Provider 接口

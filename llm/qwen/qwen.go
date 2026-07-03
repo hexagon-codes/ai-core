@@ -2,11 +2,8 @@
 package qwen
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"time"
@@ -14,6 +11,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 	"github.com/hexagon-codes/toolkit/util/logger"
 )
@@ -29,6 +27,8 @@ type Provider struct {
 	baseURL    string
 	model      string
 	httpClient *http.Client
+	policy     *llm.NetworkPolicy
+	transport  *transport.Transport
 }
 
 // Option 是 Provider 的配置选项
@@ -55,6 +55,13 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithNetworkPolicy 设置上游网络出口约束。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建通义千问 Provider
 // apiKey 可以为空，会从环境变量 DASHSCOPE_API_KEY 或 QWEN_API_KEY 读取
 func New(apiKey string, opts ...Option) *Provider {
@@ -75,6 +82,7 @@ func New(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.policy)
 
 	return p
 }
@@ -95,14 +103,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "complete", "/chat/completions", body)
 	if err != nil {
 		logger.WarnContext(ctx, "qwen http request failed",
 			logger.Component("qwen"),
@@ -114,28 +115,6 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			logger.ErrorContext(ctx, "qwen api error and body read failed",
-				logger.Component("qwen"),
-				logger.Action("complete"),
-				logger.String("model", req.Model),
-				logger.Status(resp.StatusCode),
-				logger.Err(readErr),
-			)
-			return nil, fmt.Errorf("qwen api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		logger.ErrorContext(ctx, "qwen api non-2xx response",
-			logger.Component("qwen"),
-			logger.Action("complete"),
-			logger.String("model", req.Model),
-			logger.Status(resp.StatusCode),
-			logger.String("body", string(bodyBytes)),
-		)
-		return nil, fmt.Errorf("qwen api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result qwenResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -162,14 +141,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/chat/completions", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	p.setHeaders(httpReq)
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "stream", "/chat/completions", body)
 	if err != nil {
 		logger.WarnContext(ctx, "qwen stream http request failed",
 			logger.Component("qwen"),
@@ -179,29 +151,6 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 			logger.Err(err),
 		)
 		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			logger.ErrorContext(ctx, "qwen stream api error and body read failed",
-				logger.Component("qwen"),
-				logger.Action("stream"),
-				logger.String("model", req.Model),
-				logger.Status(resp.StatusCode),
-				logger.Err(readErr),
-			)
-			return nil, fmt.Errorf("qwen api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		logger.ErrorContext(ctx, "qwen stream api non-2xx response",
-			logger.Component("qwen"),
-			logger.Action("stream"),
-			logger.String("model", req.Model),
-			logger.Status(resp.StatusCode),
-			logger.String("body", string(bodyBytes)),
-		)
-		return nil, fmt.Errorf("qwen api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	// 通义千问使用 OpenAI 兼容格式
@@ -284,6 +233,19 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 func (p *Provider) setHeaders(req *http.Request) {
 	req.Header.Set("Content-Type", "application/json")
 	req.Header.Set("Authorization", "Bearer "+p.apiKey)
+}
+
+func (p *Provider) doRequest(ctx context.Context, action, path string, body []byte) (*http.Response, error) {
+	return transport.Do(ctx, transport.Request{
+		Provider:   "qwen",
+		Action:     action,
+		Method:     http.MethodPost,
+		URL:        p.baseURL + path,
+		Body:       body,
+		Client:     p.httpClient,
+		Transport:  p.transport,
+		SetHeaders: p.setHeaders,
+	})
 }
 
 // buildRequestBody 构建请求体

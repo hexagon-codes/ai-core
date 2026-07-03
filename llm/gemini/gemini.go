@@ -2,11 +2,9 @@
 package gemini
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"os"
 	"strings"
@@ -15,6 +13,7 @@ import (
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
 	"github.com/hexagon-codes/ai-core/tokenizer"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 	"github.com/hexagon-codes/toolkit/util/idgen"
 )
@@ -30,6 +29,8 @@ type Provider struct {
 	baseURL    string
 	model      string
 	httpClient *http.Client
+	transport  *transport.Transport
+	policy     *llm.NetworkPolicy
 }
 
 // Option 是 Provider 的配置选项
@@ -56,6 +57,13 @@ func WithHTTPClient(client *http.Client) Option {
 	}
 }
 
+// WithNetworkPolicy 设置上游网络出口约束。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) {
+		p.policy = transport.CloneNetworkPolicy(&policy)
+	}
+}
+
 // New 创建 Gemini Provider
 // apiKey 可以为空，会从环境变量 GOOGLE_API_KEY 或 GEMINI_API_KEY 读取
 func New(apiKey string, opts ...Option) *Provider {
@@ -76,6 +84,7 @@ func New(apiKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.policy)
 
 	return p
 }
@@ -96,28 +105,11 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/models/%s:generateContent", p.baseURL, req.Model)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", p.apiKey)
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "complete", fmt.Sprintf("%s/models/%s:generateContent", p.baseURL, req.Model), body, false)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("gemini api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("gemini api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result geminiResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -138,27 +130,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	url := fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse", p.baseURL, req.Model)
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "stream", fmt.Sprintf("%s/models/%s:streamGenerateContent?alt=sse", p.baseURL, req.Model), body, true)
 	if err != nil {
 		return nil, err
-	}
-
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("x-goog-api-key", p.apiKey)
-
-	resp, err := p.httpClient.Do(httpReq)
-	if err != nil {
-		return nil, err
-	}
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		resp.Body.Close()
-		if readErr != nil {
-			return nil, fmt.Errorf("gemini api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("gemini api error: %s, body: %s", resp.Status, string(bodyBytes))
 	}
 
 	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.GeminiFormat), nil
@@ -549,27 +523,11 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 	}
 	body, _ := json.Marshal(payload)
 
-	url := fmt.Sprintf("%s/models/%s:batchEmbedContents", p.baseURL, model)
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
+	resp, err := p.doRequest(ctx, "embed", fmt.Sprintf("%s/models/%s:batchEmbedContents", p.baseURL, model), body, false)
 	if err != nil {
-		return nil, err
-	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("x-goog-api-key", p.apiKey)
-
-	resp, err := p.httpClient.Do(req)
-	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("gemini embed error: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("gemini embed error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("gemini embed error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result struct {
 		Embeddings []struct {
@@ -586,6 +544,26 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 	}
 
 	return embeddings, nil
+}
+
+func (p *Provider) doRequest(ctx context.Context, action, url string, body []byte, stream bool) (*http.Response, error) {
+	cfg := transport.Request{
+		Provider:  p.Name(),
+		Action:    action,
+		Method:    http.MethodPost,
+		URL:       url,
+		Body:      body,
+		Client:    p.httpClient,
+		Transport: p.transport,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("x-goog-api-key", p.apiKey)
+		},
+	}
+	if stream {
+		cfg.StreamIdle = 5 * time.Minute
+	}
+	return transport.Do(ctx, cfg)
 }
 
 // 确保实现了 Provider 和 EmbeddingProvider 接口

@@ -8,7 +8,6 @@
 package ernie
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -19,6 +18,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -38,6 +38,8 @@ type Provider struct {
 	baseURL     string
 	model       string
 	httpClient  *http.Client
+	transport   *transport.Transport
+	policy      *llm.NetworkPolicy
 	mu          sync.Mutex
 	accessToken string
 	tokenExpiry time.Time
@@ -61,6 +63,11 @@ func WithHTTPClient(client *http.Client) Option {
 	return func(p *Provider) { p.httpClient = client }
 }
 
+// WithNetworkPolicy 设置上游网络出口约束。
+func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
+	return func(p *Provider) { p.policy = transport.CloneNetworkPolicy(&policy) }
+}
+
 // New 创建 ERNIE Provider
 func New(apiKey, secretKey string, opts ...Option) *Provider {
 	p := &Provider{
@@ -73,6 +80,7 @@ func New(apiKey, secretKey string, opts ...Option) *Provider {
 	for _, opt := range opts {
 		opt(p)
 	}
+	p.transport = transport.NewTransport(p.httpClient, p.policy)
 	return p
 }
 
@@ -94,13 +102,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	body := p.buildRequest(req, false)
 	url := fmt.Sprintf("%s/chat/%s?access_token=%s", p.baseURL, model, token)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "complete", url, body, false)
 	if err != nil {
 		return nil, fmt.Errorf("ernie request failed: %w", err)
 	}
@@ -129,14 +131,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 	body := p.buildRequest(req, true)
 	url := fmt.Sprintf("%s/chat/%s?access_token=%s", p.baseURL, model, token)
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Accept", "text/event-stream")
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, "stream", url, body, true)
 	if err != nil {
 		return nil, fmt.Errorf("ernie stream failed: %w", err)
 	}
@@ -177,7 +172,14 @@ func (p *Provider) ensureToken(ctx context.Context) (string, error) {
 	url := fmt.Sprintf("%s?grant_type=client_credentials&client_id=%s&client_secret=%s",
 		tokenURL, p.apiKey, p.secretKey)
 
-	resp, err := p.httpClient.Get(url)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  p.Name(),
+		Action:    "auth",
+		Method:    http.MethodGet,
+		URL:       url,
+		Client:    p.httpClient,
+		Transport: p.transport,
+	})
 	if err != nil {
 		return "", fmt.Errorf("token request failed: %w", err)
 	}
@@ -198,6 +200,28 @@ func (p *Provider) ensureToken(ctx context.Context) (string, error) {
 	p.accessToken = result.AccessToken
 	p.tokenExpiry = time.Now().Add(time.Duration(result.ExpiresIn) * time.Second)
 	return p.accessToken, nil
+}
+
+func (p *Provider) doRequest(ctx context.Context, action, url string, body []byte, stream bool) (*http.Response, error) {
+	cfg := transport.Request{
+		Provider:  p.Name(),
+		Action:    action,
+		Method:    http.MethodPost,
+		URL:       url,
+		Body:      body,
+		Client:    p.httpClient,
+		Transport: p.transport,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			if stream {
+				r.Header.Set("Accept", "text/event-stream")
+			}
+		},
+	}
+	if stream {
+		cfg.StreamIdle = 5 * time.Minute
+	}
+	return transport.Do(ctx, cfg)
 }
 
 type ernieMessage struct {

@@ -1,11 +1,9 @@
 package ollama
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -64,25 +62,11 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 		return nil, fmt.Errorf("序列化 embedding 请求失败: %w", err)
 	}
 
-	httpReq, err := http.NewRequestWithContext(ctx, "POST", p.baseURL+"/api/embed", bytes.NewReader(body))
-	if err != nil {
-		return nil, err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	resp, err := p.httpClient.Do(httpReq)
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/embed", body, false)
 	if err != nil {
 		return nil, fmt.Errorf("ollama embedding 请求失败: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		bodyBytes, readErr := io.ReadAll(resp.Body)
-		if readErr != nil {
-			return nil, fmt.Errorf("ollama embedding api error: %s (failed to read body: %v)", resp.Status, readErr)
-		}
-		return nil, fmt.Errorf("ollama embedding api error: %s, body: %s", resp.Status, string(bodyBytes))
-	}
 
 	var result ollamaEmbedResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
