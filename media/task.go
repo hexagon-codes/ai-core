@@ -22,6 +22,7 @@ package media
 
 import (
 	"context"
+	"strings"
 	"time"
 )
 
@@ -43,13 +44,44 @@ const (
 	TaskSucceeded TaskState = "succeeded"
 	// TaskFailed 任务失败。
 	TaskFailed TaskState = "failed"
+	// TaskCancelled 任务取消。
+	TaskCancelled TaskState = "cancelled"
 )
 
 // Terminal 报告状态是否为终态（成功或失败）。
 //
 // 轮询循环应在终态时停止。
 func (s TaskState) Terminal() bool {
-	return s == TaskSucceeded || s == TaskFailed
+	return s == TaskSucceeded || s == TaskFailed || s == TaskCancelled
+}
+
+// NormalizeTaskState 把上游各异的任务状态字符串映射到统一的 TaskState。
+//
+// 这是 image / video 子域共享的单一映射源：以前两包各持一份 switch，
+// 曾因 video 版漏掉 content_moderated 而让被审核拦截的视频任务落入
+// default→TaskRunning、WaitFor 永不终止（bug-20260702）。合并为一份后
+// 词表就不会再漂移。词表取两包并集，各词映射语义在两包间本就一致：
+//   - *_moderated：request_moderated 仍在送审（进行中）；content_moderated
+//     已被拦截（失败终态）。
+//   - 未知非空状态按进行中处理（继续轮询），空状态按排队处理。
+func NormalizeTaskState(status string) TaskState {
+	switch strings.ToLower(strings.TrimSpace(status)) {
+	case "queued", "queueing", "submitted", "pending", "created":
+		return TaskQueued
+	case "running", "processing", "generating", "in_progress", "request_moderated":
+		return TaskRunning
+	case "succeeded", "success", "succeed", "completed", "done", "ready":
+		return TaskSucceeded
+	case "failed", "fail", "error", "content_moderated":
+		return TaskFailed
+	case "cancelled", "canceled":
+		return TaskCancelled
+	default:
+		if status == "" {
+			return TaskQueued
+		}
+		return TaskRunning
+	}
 }
 
 // PollFunc 轮询一次异步任务，返回任务是否到达终态及可能的错误。

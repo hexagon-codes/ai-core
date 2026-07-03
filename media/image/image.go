@@ -31,19 +31,25 @@ type Provider interface {
 
 // Request 图像生成请求。
 type Request struct {
-	Model    string `json:"model"`              // 模型 ID（如 "dall-e-3"、"cogview-4"）
-	Prompt   string `json:"prompt"`             // 提示词（必填）
-	Negative string `json:"negative,omitempty"` // 反向提示词（部分 Provider 支持）
-	Size     string `json:"size,omitempty"`     // 尺寸 "1024x1024" / "1792x1024" 等
-	N        int    `json:"n,omitempty"`        // 张数，默认 1
-	Style    string `json:"style,omitempty"`    // "vivid" / "natural"（DALL-E 3）
-	Quality  string `json:"quality,omitempty"`  // "standard" / "hd"（DALL-E 3）
-	UserID   string `json:"user,omitempty"`     // 终端用户标识（合规追踪）
+	Model    string `json:"model"`               // 模型 ID（如 "dall-e-3"、"cogview-4"）
+	Prompt   string `json:"prompt"`              // 提示词（必填）
+	Negative string `json:"negative,omitempty"`  // 反向提示词（部分 Provider 支持）
+	ImageURL string `json:"image_url,omitempty"` // 参考图 / 图生图输入（部分 Provider 支持）
+	Size     string `json:"size,omitempty"`      // 尺寸 "1024x1024" / "1792x1024" 等
+	Ratio    string `json:"ratio,omitempty"`     // 画幅 "1:1" / "16:9" / "9:16" 等
+	N        int    `json:"n,omitempty"`         // 张数，默认 1
+	Style    string `json:"style,omitempty"`     // "vivid" / "natural"（DALL-E 3）
+	Quality  string `json:"quality,omitempty"`   // "standard" / "hd"（DALL-E 3）
+	UserID   string `json:"user,omitempty"`      // 终端用户标识（合规追踪）
 
 	// Seed 随机种子，用于复现同一结果（SD / Flux / CogView 等支持；0=不指定）。
 	Seed int `json:"seed,omitempty"`
 	// ResponseFormat 返回形态："url" 或 "b64_json"（OpenAI images 参数；空=Provider 默认）。
 	ResponseFormat string `json:"response_format,omitempty"`
+	// IdempotencyKey 是上游幂等键；Provider 支持时会透传。
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	// CallbackURL 是异步 Provider 的回调地址；同步 Provider 通常忽略。
+	CallbackURL string `json:"callback_url,omitempty"`
 	// Extra 承载 Provider 特有参数（如 steps / cfg_scale / 采样器等），
 	// 避免为每个上游差异不断扩张通用字段。Provider 实现自行读取所需键。
 	Extra map[string]any `json:"extra,omitempty"`
@@ -59,11 +65,13 @@ type Image struct {
 
 // Result 生成结果。
 type Result struct {
-	Provider string  `json:"provider"`           // Provider 名称（如 "openai-dalle"）
-	Model    string  `json:"model"`              // 实际使用的模型
-	Created  int64   `json:"created"`            // 时间戳（秒）
-	Images   []Image `json:"images"`             // 生成的图像列表
-	UsageMs  int64   `json:"usage_ms,omitempty"` // 耗时（毫秒）
+	Provider  string  `json:"provider"`             // Provider 名称（如 "openai-dalle"）
+	Model     string  `json:"model"`                // 实际使用的模型
+	Created   int64   `json:"created"`              // 时间戳（秒）
+	Images    []Image `json:"images"`               // 生成的图像列表
+	RequestID string  `json:"request_id,omitempty"` // 上游 request id / trace id
+	Billed    *bool   `json:"billed,omitempty"`     // 上游是否计费；nil=unknown
+	UsageMs   int64   `json:"usage_ms,omitempty"`   // 耗时（毫秒）
 }
 
 // Service 文生图服务。

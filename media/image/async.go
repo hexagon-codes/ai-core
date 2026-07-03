@@ -25,11 +25,14 @@ type AsyncImageProvider interface {
 
 // TaskStatus 异步图像任务状态。
 type TaskStatus struct {
-	TaskID   string          `json:"task_id"`
-	State    media.TaskState `json:"state"`
-	Result   *Result         `json:"result,omitempty"`
-	Error    string          `json:"error,omitempty"`
-	Progress float64         `json:"progress,omitempty"`
+	TaskID    string          `json:"task_id"`
+	State     media.TaskState `json:"state"`
+	Result    *Result         `json:"result,omitempty"`
+	Error     string          `json:"error,omitempty"`
+	RequestID string          `json:"request_id,omitempty"`
+	Billed    *bool           `json:"billed,omitempty"`
+	Progress  float64         `json:"progress,omitempty"`
+	RawStatus string          `json:"raw_status,omitempty"`
 }
 
 // SubmitAndWait 是异步文生图的同步包装：先 Submit，再用 media.WaitFor 按

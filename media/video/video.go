@@ -12,6 +12,8 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+
+	"github.com/hexagon-codes/ai-core/media"
 )
 
 // Provider 文生视频 Provider 接口。
@@ -29,31 +31,42 @@ type Provider interface {
 
 // Request 视频生成请求。
 type Request struct {
-	Model     string `json:"model"`                // 模型 ID（如 "cogvideox-2"）
-	Prompt    string `json:"prompt"`               // 文本提示词
-	ImageURL  string `json:"image_url,omitempty"`  // 首帧图（图生视频）
-	Quality   string `json:"quality,omitempty"`    // "speed" / "quality"（CogVideoX）
-	WithAudio bool   `json:"with_audio,omitempty"` // 是否生成音轨
-	Duration  int    `json:"duration,omitempty"`   // 时长秒（部分模型支持）
-	FPS       int    `json:"fps,omitempty"`        // 帧率
-	Size      string `json:"size,omitempty"`       // 分辨率 1280x720
-	UserID    string `json:"user_id,omitempty"`    // 终端用户标识
+	Model          string         `json:"model"`                     // 模型 ID（如 "cogvideox-2"）
+	Prompt         string         `json:"prompt"`                    // 文本提示词
+	Negative       string         `json:"negative,omitempty"`        // 反向提示词（部分 Provider 支持）
+	ImageURL       string         `json:"image_url,omitempty"`       // 首帧图（图生视频）
+	EndImageURL    string         `json:"end_image_url,omitempty"`   // 尾帧图（部分模型支持）
+	Quality        string         `json:"quality,omitempty"`         // "speed" / "quality"（CogVideoX）
+	WithAudio      bool           `json:"with_audio,omitempty"`      // 是否生成音轨
+	Duration       int            `json:"duration,omitempty"`        // 时长秒（部分模型支持）
+	FPS            int            `json:"fps,omitempty"`             // 帧率
+	Size           string         `json:"size,omitempty"`            // 分辨率 1280x720
+	Ratio          string         `json:"ratio,omitempty"`           // 画幅，如 16:9 / 9:16 / 1:1
+	Seed           int64          `json:"seed,omitempty"`            // 随机种子，0=不指定
+	UserID         string         `json:"user_id,omitempty"`         // 终端用户标识
+	IdempotencyKey string         `json:"idempotency_key,omitempty"` // 上游幂等键（若 Provider 支持）
+	CallbackURL    string         `json:"callback_url,omitempty"`    // 上游回调 URL（若 Provider 支持）
+	Extra          map[string]any `json:"extra,omitempty"`           // Provider 特有参数
 }
 
 // TaskStatus 任务状态。
 type TaskStatus struct {
-	TaskID        string  `json:"task_id"`
-	Provider      string  `json:"provider"`
-	Model         string  `json:"model"`
-	Status        string  `json:"status"`                    // queueing / running / success / failed
-	Done          bool    `json:"done"`                      // status==success / failed
-	VideoURL      string  `json:"video_url,omitempty"`       // Provider 给的临时 URL（24h 过期）
-	VideoFilePath string  `json:"video_file_path,omitempty"` // 持久化路径（成功后由 handler 落盘）
-	CoverURL      string  `json:"cover_url,omitempty"`       // 封面图 URL（部分 Provider 提供）
-	CoverFilePath string  `json:"cover_file_path,omitempty"` // 封面图持久化路径
-	Error         string  `json:"error,omitempty"`
-	Progress      float64 `json:"progress,omitempty"`
-	UsageMs       int64   `json:"usage_ms,omitempty"`
+	TaskID        string          `json:"task_id"`
+	Provider      string          `json:"provider"`
+	Model         string          `json:"model"`
+	Status        string          `json:"status"`                    // queueing / running / success / failed
+	State         media.TaskState `json:"state,omitempty"`           // queued/running/succeeded/failed/cancelled
+	Done          bool            `json:"done"`                      // status==success / failed
+	VideoURL      string          `json:"video_url,omitempty"`       // Provider 给的临时 URL（24h 过期）
+	VideoFilePath string          `json:"video_file_path,omitempty"` // 持久化路径（成功后由 handler 落盘）
+	CoverURL      string          `json:"cover_url,omitempty"`       // 封面图 URL（部分 Provider 提供）
+	CoverFilePath string          `json:"cover_file_path,omitempty"` // 封面图持久化路径
+	Error         string          `json:"error,omitempty"`
+	RequestID     string          `json:"request_id,omitempty"` // 上游 request id / trace id
+	Billed        *bool           `json:"billed,omitempty"`     // 上游是否计费；nil=unknown
+	Progress      float64         `json:"progress,omitempty"`
+	UsageMs       int64           `json:"usage_ms,omitempty"`
+	RawStatus     string          `json:"raw_status,omitempty"` // 上游原始状态
 }
 
 // Service 视频生成服务（多 Provider 路由）。

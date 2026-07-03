@@ -56,6 +56,7 @@ type Result struct {
 	UserText    string `json:"user_text,omitempty"`  // 用户音频转写（gpt-4o 也返回）
 	Format      string `json:"format,omitempty"`     // 实际输出格式
 	UsageMs     int64  `json:"usage_ms,omitempty"`
+	RequestID   string `json:"request_id,omitempty"` // 上游 request id / trace id
 }
 
 // Service 多 Provider 路由。

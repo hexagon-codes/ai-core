@@ -87,9 +87,12 @@ type TTSProvider interface {
 
 // TranscribeOptions STT 转录选项
 type TranscribeOptions struct {
-	Language string      `json:"language,omitempty"` // 语言代码（如 "zh", "en"），空则自动检测
-	Format   AudioFormat `json:"format,omitempty"`   // 音频格式，空则自动检测
-	Prompt   string      `json:"prompt,omitempty"`   // 提示词（帮助识别特定术语）
+	Language       string         `json:"language,omitempty"`        // 语言代码（如 "zh", "en"），空则自动检测
+	Format         AudioFormat    `json:"format,omitempty"`          // 音频格式，空则自动检测
+	Prompt         string         `json:"prompt,omitempty"`          // 提示词（帮助识别特定术语）
+	UserID         string         `json:"user_id,omitempty"`         // 终端用户标识（合规追踪）
+	IdempotencyKey string         `json:"idempotency_key,omitempty"` // 上游幂等键（若 Provider 支持）
+	Extra          map[string]any `json:"extra,omitempty"`           // Provider 特有参数
 }
 
 // TranscribeResult STT 转录结果
@@ -98,21 +101,27 @@ type TranscribeResult struct {
 	Language   string  `json:"language,omitempty"`   // 检测到的语言
 	Duration   float64 `json:"duration,omitempty"`   // 音频时长（秒）
 	Confidence float64 `json:"confidence,omitempty"` // 置信度 (0-1)
+	RequestID  string  `json:"request_id,omitempty"` // 上游 request id / trace id
 }
 
 // SynthesizeOptions TTS 合成选项
 type SynthesizeOptions struct {
-	Voice  string      `json:"voice,omitempty"`  // 音色名称
-	Format AudioFormat `json:"format,omitempty"` // 输出格式，默认 mp3
-	Speed  float64     `json:"speed,omitempty"`  // 语速（0.25-4.0），默认 1.0
+	Voice          string         `json:"voice,omitempty"`           // 音色名称
+	Format         AudioFormat    `json:"format,omitempty"`          // 输出格式，默认 mp3
+	Speed          float64        `json:"speed,omitempty"`           // 语速（0.25-4.0），默认 1.0
+	UserID         string         `json:"user_id,omitempty"`         // 终端用户标识（合规追踪）
+	IdempotencyKey string         `json:"idempotency_key,omitempty"` // 上游幂等键（若 Provider 支持）
+	Extra          map[string]any `json:"extra,omitempty"`           // Provider 特有参数
 }
 
 // SynthesizeResult TTS 合成结果
 type SynthesizeResult struct {
-	Audio    []byte      `json:"-"`        // 音频数据
-	Format   AudioFormat `json:"format"`   // 输出格式
-	Duration float64     `json:"duration"` // 音频时长（秒）
-	Size     int         `json:"size"`     // 数据大小（字节）
+	Audio     []byte      `json:"-"`                    // 音频数据
+	Format    AudioFormat `json:"format"`               // 输出格式
+	Duration  float64     `json:"duration"`             // 音频时长（秒）
+	Size      int         `json:"size"`                 // 数据大小（字节）
+	RequestID string      `json:"request_id,omitempty"` // 上游 request id / trace id
+	Billed    *bool       `json:"billed,omitempty"`     // 上游是否计费；nil=unknown
 }
 
 // VoiceInfo 音色信息
