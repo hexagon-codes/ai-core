@@ -3,6 +3,24 @@
 本文件记录 ai-core 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
 ## [Unreleased]
+### Added
+- `catalog`：新增 Provider / Model 能力矩阵注册表，统一描述 `Modality`、`Feature`、上下文窗口、异步能力、官方 API 标记、来源和成本信息；Provider 可实现 `catalog.Provider` 暴露 `Capabilities()`，上层可通过 `Registry` + `Query` 做模型选择、运营展示和 conformance 校验。
+- `transport`：新增共享上游 HTTP 传输层，提供结构化 `ProviderError`、错误体限长与请求预览、RequestID / Retry-After 提取、安全 Header 合并、请求超时、流式 idle timeout、瞬时错误重试和 SSRF/network policy。`llm.ProviderError`、`llm.NetworkPolicy`、`llm.ErrNetworkPolicy` 作为别名保留兼容。
+- `llm/compatible`：新增 OpenAI-compatible 通用 Provider，支持 `Complete` / `Stream` / `Embed` / `Models` / `Capabilities`；内置 OpenRouter、Groq、Together、Perplexity、xAI、Mistral、Fireworks、DeepInfra、SiliconFlow、Moonshot、Baichuan、StepFun、ModelArk、Doubao 国内外 profile。
+- `media/image`：新增 BFL FLUX 官方异步 Provider、异步兼容网关 Provider、Midjourney-compatible 便捷构造器，以及 `AsyncImageProvider` / `SubmitAndWait` 同步包装。
+- `media/video`：新增 Seedance / Doubao 中国区与全球区、Kling、Vidu、Google Veo、兼容网关 Provider；支持首帧/尾帧、音轨、画幅、时长、回调、幂等键和能力矩阵输出。
+- `media/voice`：新增 ElevenLabs TTS Provider。
+
+### Changed
+- 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
+- `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
+- `llm` 缓存默认 key 改为完整请求的稳定 JSON hash，覆盖 `MultiContent`、`Metadata`、tools、response format 等会影响上游语义的字段；不可序列化请求会跳过缓存读写，避免伪 key 漂移和缓存堆积。
+- `media` 统一任务状态归一化，新增 `TaskCancelled`，`TaskState.Terminal()` 覆盖成功、失败和取消。
+
+### Fixed
+- `streamx.Stream.Close`：先关闭底层 reader 再等待后台 goroutine，避免 processLoop 阻塞在读输入时 `Close()` 卡住；`Collect()` 在 chunk channel 关闭后补读一次错误通道，避免漏报末尾错误。
+- `media/video`：`content_moderated` 映射为失败终态，避免审核拦截后 `WaitFor` 长时间继续轮询。
+- `media` Submit 重试策略：计费型任务创建请求未提供 `IdempotencyKey` 时禁用自动重试，避免二义性失败后重复创建任务和重复计费。
 
 ## [0.1.11]
 ### Added
