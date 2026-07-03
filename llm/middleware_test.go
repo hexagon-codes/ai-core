@@ -3,6 +3,7 @@ package llm
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -154,6 +155,63 @@ func TestRetryMiddleware(t *testing.T) {
 			t.Fatalf("expected 3 calls, got %d", mock.callCount.Load())
 		}
 	})
+
+	t.Run("ProviderError 状态码控制重试", func(t *testing.T) {
+		badRequest := &mockProvider{
+			name: "test",
+			completeErr: &ProviderError{
+				Provider:   "openai",
+				StatusCode: 400,
+				Status:     "400 Bad Request",
+				Body:       `{"error":"bad request"}`,
+			},
+		}
+		p := Chain(badRequest, WithRetry(3, time.Millisecond))
+		_, err := p.Complete(context.Background(), CompletionRequest{})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if badRequest.callCount.Load() != 1 {
+			t.Fatalf("400 ProviderError 不应重试, got %d calls", badRequest.callCount.Load())
+		}
+
+		serverError := &mockProvider{
+			name: "test",
+			completeErr: &ProviderError{
+				Provider:   "openai",
+				StatusCode: 503,
+				Status:     "503 Service Unavailable",
+				Body:       `{"error":"down"}`,
+			},
+		}
+		p = Chain(serverError, WithRetry(1, time.Millisecond))
+		_, err = p.Complete(context.Background(), CompletionRequest{})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if serverError.callCount.Load() != 2 {
+			t.Fatalf("503 ProviderError 应重试 1 次, got %d calls", serverError.callCount.Load())
+		}
+	})
+
+	t.Run("NetworkPolicy 错误不应重试", func(t *testing.T) {
+		policyBlocked := &mockProvider{
+			name: "test",
+			completeErr: &ProviderError{
+				Provider: "openai",
+				Action:   "complete",
+				Cause:    fmt.Errorf("%w: scheme \"http\" is not allowed", ErrNetworkPolicy),
+			},
+		}
+		p := Chain(policyBlocked, WithRetry(3, time.Millisecond))
+		_, err := p.Complete(context.Background(), CompletionRequest{})
+		if err == nil {
+			t.Fatal("expected error")
+		}
+		if policyBlocked.callCount.Load() != 1 {
+			t.Fatalf("network policy error should not be retried, got %d calls", policyBlocked.callCount.Load())
+		}
+	})
 }
 
 type failThenSucceedProvider struct {
@@ -286,6 +344,91 @@ func TestCacheMiddleware(t *testing.T) {
 	}
 	if mock.callCount.Load() != 1 { // 仍然是 1
 		t.Fatalf("expected 1 call (cached), got %d", mock.callCount.Load())
+	}
+}
+
+func TestDefaultCacheKey_IncludesMultiContent(t *testing.T) {
+	key1 := defaultCacheKey(&CompletionRequest{
+		Model: "gpt-4o",
+		Messages: []Message{{
+			Role:         RoleUser,
+			MultiContent: []ContentPart{{Type: "image_url", ImageURL: &ImageURL{URL: "https://example.com/a.png", Detail: "low"}}},
+		}},
+	})
+	key2 := defaultCacheKey(&CompletionRequest{
+		Model: "gpt-4o",
+		Messages: []Message{{
+			Role:         RoleUser,
+			MultiContent: []ContentPart{{Type: "image_url", ImageURL: &ImageURL{URL: "https://example.com/b.png", Detail: "low"}}},
+		}},
+	})
+
+	if key1 == key2 {
+		t.Fatal("different multimodal message content must not share a cache key")
+	}
+}
+
+func TestDefaultCacheKey_IncludesMetadata(t *testing.T) {
+	key1 := defaultCacheKey(&CompletionRequest{
+		Model:    "qwen",
+		Messages: []Message{{Role: RoleUser, Content: "think?"}},
+		Metadata: map[string]any{"enable_thinking": true},
+	})
+	key2 := defaultCacheKey(&CompletionRequest{
+		Model:    "qwen",
+		Messages: []Message{{Role: RoleUser, Content: "think?"}},
+		Metadata: map[string]any{"enable_thinking": false},
+	})
+
+	if key1 == key2 {
+		t.Fatal("metadata that changes upstream request semantics must affect cache key")
+	}
+}
+
+// 序列化失败的请求不能落回 %#v 伪键（会打印指针地址导致同请求键漂移），
+// defaultCacheKey 应返回空串标记为不可缓存。
+func TestDefaultCacheKey_UnmarshalableRequestYieldsNoKey(t *testing.T) {
+	key := defaultCacheKey(&CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"bad": make(chan int)},
+	})
+	if key != "" {
+		t.Fatalf("unmarshalable request must be uncacheable, got key %q", key)
+	}
+}
+
+// 不可缓存的请求应整体跳过缓存读写：不写入伪键、每次直达底层 Provider。
+func TestCacheMiddleware_SkipsUnmarshalableRequest(t *testing.T) {
+	mock := &mockProvider{
+		name:         "test",
+		completeResp: &CompletionResponse{Content: "fresh"},
+	}
+	cache := &inMemoryTestCache{data: make(map[string]*CompletionResponse)}
+	p := Chain(mock, WithCache(cache, nil))
+
+	req := CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []Message{{Role: RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"bad": make(chan int)},
+	}
+
+	for i := 0; i < 2; i++ {
+		resp, err := p.Complete(context.Background(), req)
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if resp.Content != "fresh" {
+			t.Fatalf("expected 'fresh', got %q", resp.Content)
+		}
+	}
+	if mock.callCount.Load() != 2 {
+		t.Fatalf("uncacheable request must reach provider every time, got %d calls", mock.callCount.Load())
+	}
+	cache.mu.RLock()
+	defer cache.mu.RUnlock()
+	if len(cache.data) != 0 {
+		t.Fatalf("uncacheable request must not be written to cache, got %d entries", len(cache.data))
 	}
 }
 

@@ -65,6 +65,15 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 	if err == nil && httpStatus == 0 {
 		return FailNone
 	}
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) {
+		if httpStatus == 0 {
+			httpStatus = providerErr.StatusCode
+		}
+		if body == "" {
+			body = providerErr.Body
+		}
+	}
 
 	// 1. HTTP 状态码优先分类
 	switch httpStatus {

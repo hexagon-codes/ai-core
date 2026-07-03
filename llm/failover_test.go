@@ -29,6 +29,28 @@ func TestClassifyError_ByHTTPStatus(t *testing.T) {
 	}
 }
 
+func TestClassifyError_ProviderError(t *testing.T) {
+	err := &ProviderError{
+		Provider:   "openai",
+		StatusCode: 429,
+		Status:     "429 Too Many Requests",
+		Body:       `{"error":"rate limit"}`,
+	}
+	if got := ClassifyError(err, 0, ""); got != FailRateLimit {
+		t.Fatalf("ClassifyError(ProviderError 429) = %s, want %s", got, FailRateLimit)
+	}
+
+	err = &ProviderError{
+		Provider:   "openai",
+		StatusCode: 400,
+		Status:     "400 Bad Request",
+		Body:       `{"error":"context length exceeded"}`,
+	}
+	if got := ClassifyError(err, 0, ""); got != FailContextTooLong {
+		t.Fatalf("ClassifyError(ProviderError 400 context) = %s, want %s", got, FailContextTooLong)
+	}
+}
+
 func TestClassifyError_ByMessage(t *testing.T) {
 	cases := []struct {
 		msg  string

@@ -5,8 +5,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
-	"fmt"
-	"strconv"
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -21,6 +20,20 @@ import (
 func isRetryableError(err error) bool {
 	if err == nil {
 		return false
+	}
+	if errors.Is(err, ErrNetworkPolicy) {
+		return false
+	}
+	var providerErr *ProviderError
+	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
+		switch providerErr.StatusCode {
+		case 408, 409, 429:
+			return true
+		case 400, 401, 402, 403, 404, 422:
+			return false
+		default:
+			return providerErr.StatusCode >= 500
+		}
 	}
 	msg := err.Error()
 	// 常见不可重试错误特征
@@ -409,12 +422,15 @@ func (p *cacheProvider) CountTokens(messages []Message) (int, error) {
 }
 
 func (p *cacheProvider) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
-	// 生成缓存键
+	// 生成缓存键；空键表示请求不可缓存（如序列化失败），整体跳过缓存读写
 	var key string
 	if p.keyFn != nil {
 		key = p.keyFn(&req)
 	} else {
 		key = defaultCacheKey(&req)
+	}
+	if key == "" {
+		return p.inner.Complete(ctx, req)
 	}
 
 	// 查找缓存
@@ -455,78 +471,14 @@ func (p *cacheProvider) Stream(ctx context.Context, req CompletionRequest) (*str
 
 // defaultCacheKey 默认的缓存键生成
 //
-// 使用 \x00 分隔符避免碰撞，包含所有影响 LLM 输出的请求字段。
-// \x00 在合法 UTF-8 文本中不会出现，因此可以安全地作为分隔符。
+// 使用完整请求的稳定 JSON 表示，避免遗漏 MultiContent、Metadata 等会影响上游语义的字段。
+// 序列化失败时返回空串标记请求不可缓存：不能落回 %#v 伪键，
+// 其中的指针地址会让同一请求每次生成不同键，缓存永不命中且条目堆积。
 func defaultCacheKey(req *CompletionRequest) string {
-	var b strings.Builder
-	b.WriteString(req.Model)
-
-	// Messages
-	for _, msg := range req.Messages {
-		b.WriteByte(0)
-		b.WriteString(string(msg.Role))
-		b.WriteByte(0)
-		b.WriteString(msg.Content)
+	data, err := json.Marshal(req)
+	if err != nil {
+		return ""
 	}
-
-	// MaxTokens
-	if req.MaxTokens > 0 {
-		b.WriteByte(0)
-		b.WriteString("mt:")
-		b.WriteString(strconv.Itoa(req.MaxTokens))
-	}
-
-	// Temperature
-	if req.Temperature != nil {
-		b.WriteByte(0)
-		b.WriteString("t:")
-		b.WriteString(strconv.FormatFloat(*req.Temperature, 'f', -1, 64))
-	}
-
-	// TopP
-	if req.TopP != nil {
-		b.WriteByte(0)
-		b.WriteString("tp:")
-		b.WriteString(strconv.FormatFloat(*req.TopP, 'f', -1, 64))
-	}
-
-	// Stop
-	if len(req.Stop) > 0 {
-		b.WriteByte(0)
-		b.WriteString("s:")
-		b.WriteString(strings.Join(req.Stop, ","))
-	}
-
-	// User
-	if req.User != "" {
-		b.WriteByte(0)
-		b.WriteString("u:")
-		b.WriteString(req.User)
-	}
-
-	// ToolChoice
-	if req.ToolChoice != nil {
-		b.WriteByte(0)
-		b.WriteString("tc:")
-		b.WriteString(fmt.Sprint(req.ToolChoice))
-	}
-
-	// Tools
-	if len(req.Tools) > 0 {
-		b.WriteByte(0)
-		b.WriteString("tools:")
-		toolsJSON, _ := json.Marshal(req.Tools)
-		b.Write(toolsJSON)
-	}
-
-	// ResponseFormat
-	if req.ResponseFormat != nil {
-		b.WriteByte(0)
-		b.WriteString("rf:")
-		rfJSON, _ := json.Marshal(req.ResponseFormat)
-		b.Write(rfJSON)
-	}
-
-	sum := sha256.Sum256([]byte(b.String()))
+	sum := sha256.Sum256(data)
 	return hex.EncodeToString(sum[:])
 }
