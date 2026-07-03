@@ -2,7 +2,9 @@ package streamx
 
 import (
 	"context"
+	"io"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -150,6 +152,58 @@ func TestStream_Close(t *testing.T) {
 	if err != nil {
 		t.Errorf("second close error: %v", err)
 	}
+}
+
+func TestStreamCloseUnblocksBlockedRead(t *testing.T) {
+	r := newBlockingReadCloser()
+	stream := NewStream(r, OpenAIFormat)
+	stream.Start()
+	<-r.readStarted
+
+	closed := make(chan error, 1)
+	go func() {
+		closed <- stream.Close()
+	}()
+
+	select {
+	case err := <-closed:
+		if err != nil {
+			t.Fatalf("Close returned error: %v", err)
+		}
+	case <-time.After(150 * time.Millisecond):
+		_ = r.Close()
+		t.Fatal("Close blocked while processLoop was waiting for input")
+	}
+}
+
+type blockingReadCloser struct {
+	readStarted chan struct{}
+	closed      chan struct{}
+	once        sync.Once
+}
+
+func newBlockingReadCloser() *blockingReadCloser {
+	return &blockingReadCloser{
+		readStarted: make(chan struct{}),
+		closed:      make(chan struct{}),
+	}
+}
+
+func (r *blockingReadCloser) Read([]byte) (int, error) {
+	r.once.Do(func() {
+		close(r.readStarted)
+	})
+	<-r.closed
+	return 0, io.ErrClosedPipe
+}
+
+func (r *blockingReadCloser) Close() error {
+	select {
+	case <-r.closed:
+	default:
+		close(r.closed)
+	}
+	return nil
 }
 
 func TestStream_ToolCalls(t *testing.T) {

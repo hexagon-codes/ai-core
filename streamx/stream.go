@@ -380,6 +380,13 @@ func (s *Stream) Collect() (*Result, error) {
 		case _, ok := <-s.chunks:
 			if !ok {
 				// 通道关闭，处理完成
+				select {
+				case err := <-s.errors:
+					if err != nil {
+						lastErr = err
+					}
+				default:
+				}
 				s.mu.Lock()
 				result := s.result
 				s.mu.Unlock()
@@ -411,15 +418,17 @@ func (s *Stream) Close() error {
 	}
 	s.closed = true
 	s.cancel()
+	closer := s.closer
 	s.mu.Unlock()
 
-	// 等待 processLoop goroutine 退出
-	s.wg.Wait()
-
-	if s.closer != nil {
-		return s.closer.Close()
+	var closeErr error
+	if closer != nil {
+		closeErr = closer.Close()
 	}
-	return nil
+
+	// 关闭底层 reader 后再等待，确保阻塞中的 ReadString 能被唤醒。
+	s.wg.Wait()
+	return closeErr
 }
 
 // processLoop 是后台处理的主循环
