@@ -469,65 +469,71 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			continue
 		}
 
-		// 处理 SSE 格式
-		if data, found := strings.CutPrefix(line, "data:"); found {
-			data = strings.TrimSpace(data)
-
-			// 先解析数据，再判断是否结束
-			// 这样可以确保最后一个包含内容的 chunk 不会被丢弃
-			// （Gemini 的最后一个 chunk 既包含 content 又包含 finishReason）
-			chunk, err := s.parser.Parse([]byte(data))
-			if err != nil {
-				// 如果解析失败且是结束标记，则正常结束
-				if s.parser.IsDone([]byte(data)) {
-					s.finalize(contentBuf.String(), onDone)
-					return
-				}
-				s.sendErrorWithCallback(err, onError)
+		// 处理 SSE 格式；CustomFormat 额外支持原始 JSON Lines，用于 Ollama 等非 SSE 上游。
+		data, found := strings.CutPrefix(line, "data:")
+		if !found {
+			if s.format != CustomFormat {
 				continue
 			}
+			data = line
+		} else {
+			data = strings.TrimSpace(data)
+		}
 
-			if chunk != nil {
-				contentBuf.WriteString(chunk.Content)
+		// 先解析数据，再判断是否结束
+		// 这样可以确保最后一个包含内容的 chunk 不会被丢弃
+		// （Gemini 的最后一个 chunk 既包含 content 又包含 finishReason）
+		chunk, err := s.parser.Parse([]byte(data))
+		if err != nil {
+			// 如果解析失败且是结束标记，则正常结束
+			if s.parser.IsDone([]byte(data)) {
+				s.finalize(contentBuf.String(), onDone)
+				return
+			}
+			s.sendErrorWithCallback(err, onError)
+			continue
+		}
 
-				// 更新结果（加锁保护）
-				s.mu.Lock()
-				s.result.Chunks = append(s.result.Chunks, chunk)
-				if chunk.ID != "" && s.result.ID == "" {
-					s.result.ID = chunk.ID
-				}
-				if chunk.Role != "" && s.result.Role == "" {
-					s.result.Role = chunk.Role
-				}
-				if chunk.Model != "" && s.result.Model == "" {
-					s.result.Model = chunk.Model
-				}
-				if chunk.FinishReason != "" {
-					s.result.FinishReason = chunk.FinishReason
-				}
-				if len(chunk.ToolCalls) > 0 {
-					s.result.ToolCalls = mergeToolCalls(s.result.ToolCalls, chunk.ToolCalls)
-				}
-				s.mu.Unlock()
+		if chunk != nil {
+			contentBuf.WriteString(chunk.Content)
 
-				// 回调
-				if onChunk != nil {
-					onChunk(chunk)
-				}
+			// 更新结果（加锁保护）
+			s.mu.Lock()
+			s.result.Chunks = append(s.result.Chunks, chunk)
+			if chunk.ID != "" && s.result.ID == "" {
+				s.result.ID = chunk.ID
+			}
+			if chunk.Role != "" && s.result.Role == "" {
+				s.result.Role = chunk.Role
+			}
+			if chunk.Model != "" && s.result.Model == "" {
+				s.result.Model = chunk.Model
+			}
+			if chunk.FinishReason != "" {
+				s.result.FinishReason = chunk.FinishReason
+			}
+			if len(chunk.ToolCalls) > 0 {
+				s.result.ToolCalls = mergeToolCalls(s.result.ToolCalls, chunk.ToolCalls)
+			}
+			s.mu.Unlock()
 
-				// 发送到通道
-				select {
-				case s.chunks <- chunk:
-				case <-s.ctx.Done():
-					return
-				}
+			// 回调
+			if onChunk != nil {
+				onChunk(chunk)
+			}
 
-				// 在发送 chunk 后检查是否结束
-				// 这确保了最后一个有内容的 chunk 被正确处理
-				if s.parser.IsDone([]byte(data)) {
-					s.finalize(contentBuf.String(), onDone)
-					return
-				}
+			// 发送到通道
+			select {
+			case s.chunks <- chunk:
+			case <-s.ctx.Done():
+				return
+			}
+
+			// 在发送 chunk 后检查是否结束
+			// 这确保了最后一个有内容的 chunk 被正确处理
+			if s.parser.IsDone([]byte(data)) {
+				s.finalize(contentBuf.String(), onDone)
+				return
 			}
 		}
 	}

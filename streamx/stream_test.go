@@ -427,3 +427,21 @@ data: END
 		t.Errorf("expected 'Custom', got '%s'", result.Content)
 	}
 }
+
+func TestNewStreamWithParser_CustomRawJSONLines(t *testing.T) {
+	parser := &JSONParser{
+		ContentPath: "text",
+		DoneValue:   "END",
+	}
+
+	input := "{\"text\":\"Raw\"}\nEND\n"
+	stream := NewStreamWithParser(strings.NewReader(input), parser)
+	result, err := stream.Collect()
+	if err != nil {
+		t.Fatalf("error: %v", err)
+	}
+
+	if result.Content != "Raw" {
+		t.Errorf("expected 'Raw', got '%s'", result.Content)
+	}
+}

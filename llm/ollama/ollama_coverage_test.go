@@ -22,14 +22,28 @@ func TestNew_EnvAndOptions(t *testing.T) {
 	if p := New(); p.baseURL != defaultBaseURL || p.model != defaultModel {
 		t.Fatalf("默认值错误: %+v", p)
 	}
+	p := New()
+	baseTransport, ok := p.httpClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("default http client transport type = %T, want *http.Transport", p.httpClient.Transport)
+	}
+	streamTransport, ok := p.streamHTTPClient.Transport.(*http.Transport)
+	if !ok {
+		t.Fatalf("stream http client transport type = %T, want *http.Transport", p.streamHTTPClient.Transport)
+	}
+	if baseTransport.ResponseHeaderTimeout != ollamaDefaultResponseHeaderWait ||
+		streamTransport.ResponseHeaderTimeout != ollamaStreamResponseHeaderWait {
+		t.Fatalf("response header timeout mismatch: base=%v stream=%v",
+			baseTransport.ResponseHeaderTimeout, streamTransport.ResponseHeaderTimeout)
+	}
 	t.Setenv("OLLAMA_HOST", "http://envhost:1234")
 	t.Setenv("OLLAMA_MODEL", "envmodel")
-	if p := New(); p.baseURL != "http://envhost:1234" || p.model != "envmodel" {
+	if p = New(); p.baseURL != "http://envhost:1234" || p.model != "envmodel" {
 		t.Fatalf("环境变量未生效: %+v", p)
 	}
 	custom := &http.Client{}
-	p := New(WithBaseURL("http://x"), WithModel("m"), WithHTTPClient(custom))
-	if p.baseURL != "http://x" || p.model != "m" || p.httpClient != custom {
+	p = New(WithBaseURL("http://x"), WithModel("m"), WithHTTPClient(custom))
+	if p.baseURL != "http://x" || p.model != "m" || p.httpClient != custom || p.streamHTTPClient != custom {
 		t.Fatalf("选项未生效（应覆盖环境变量）: %+v", p)
 	}
 }
@@ -47,8 +61,9 @@ func TestName_CountTokens(t *testing.T) {
 
 func TestOllamaThinkFromMetadata(t *testing.T) {
 	cases := []struct {
-		meta      map[string]any
-		val, ok   bool
+		meta map[string]any
+		val  any
+		ok   bool
 	}{
 		{nil, false, false},
 		{map[string]any{}, false, false},
@@ -58,6 +73,7 @@ func TestOllamaThinkFromMetadata(t *testing.T) {
 		{map[string]any{"thinking": "ENABLED"}, true, true},
 		{map[string]any{"think": "off"}, false, true},
 		{map[string]any{"think": "no"}, false, true},
+		{map[string]any{"think": "HIGH"}, "high", true},
 		{map[string]any{"thinking": "garbage"}, false, false},
 		{map[string]any{"other": "x"}, false, false},
 		{map[string]any{"thinking": 123}, false, false}, // 非 bool/string
@@ -97,8 +113,99 @@ func TestBuildRequestBody_Options(t *testing.T) {
 		opts["num_predict"].(float64) != 100 || opts["stop"] == nil {
 		t.Errorf("options 错误: %v", opts)
 	}
+	if opts["num_ctx"].(float64) != defaultOllamaNumCtx {
+		t.Errorf("num_ctx 默认值错误: %v", opts)
+	}
 	if payload["tools"] == nil {
 		t.Errorf("tools 未写入")
+	}
+}
+
+func TestBuildRequestBody_NumCtxFromMetadataAndModelContext(t *testing.T) {
+	p := New()
+	p.models = []llm.ModelInfo{{ID: "qwen3.5:9b", Name: "qwen3.5:9b", MaxTokens: 262144}}
+
+	body, err := p.buildRequestBody(llm.CompletionRequest{
+		Model:    "qwen3.5:9b",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	opts := payload["options"].(map[string]any)
+	if opts["num_ctx"].(float64) != maxAutomaticNumCtx {
+		t.Fatalf("model context should clamp to automatic cap: %v", opts)
+	}
+
+	body, err = p.buildRequestBody(llm.CompletionRequest{
+		Model:    "qwen3.5:9b",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"num_ctx": "16384"},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	opts = payload["options"].(map[string]any)
+	if opts["num_ctx"].(float64) != 16384 {
+		t.Fatalf("metadata num_ctx should override model context: %v", opts)
+	}
+}
+
+func TestBuildRequestBody_ConvertsOpenAIMultimodalToOllamaImages(t *testing.T) {
+	p := New()
+	body, err := p.buildRequestBody(llm.CompletionRequest{
+		Model: "qwen3.5:9b",
+		Messages: []llm.Message{
+			{
+				Role: llm.RoleUser,
+				MultiContent: []llm.ContentPart{
+					{Type: "text", Text: "识别图片文字"},
+					{Type: "image_url", ImageURL: &llm.ImageURL{URL: "data:image/png;base64,QUJDRA==", Detail: "high"}},
+				},
+			},
+		},
+	}, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	messages := payload["messages"].([]any)
+	msg := messages[0].(map[string]any)
+	if msg["content"] != "识别图片文字" {
+		t.Fatalf("content = %#v, want text content", msg["content"])
+	}
+	images := msg["images"].([]any)
+	if len(images) != 1 || images[0] != "QUJDRA==" {
+		t.Fatalf("images = %#v, want base64 payload", msg["images"])
+	}
+}
+
+func TestBuildRequestBody_RejectsNonBase64OllamaImage(t *testing.T) {
+	p := New()
+	_, err := p.buildRequestBody(llm.CompletionRequest{
+		Model: "qwen3.5:9b",
+		Messages: []llm.Message{
+			{
+				Role: llm.RoleUser,
+				MultiContent: []llm.ContentPart{
+					{Type: "image_url", ImageURL: &llm.ImageURL{URL: "https://example.com/image.png"}},
+				},
+			},
+		},
+	}, false)
+	if err == nil || !strings.Contains(err.Error(), "base64") {
+		t.Fatalf("expected base64 validation error, got %v", err)
 	}
 }
 
@@ -176,6 +283,14 @@ func TestStream_SuccessAndErrors(t *testing.T) {
 	if err != nil || s == nil {
 		t.Fatalf("流式成功应返回 stream: %v", err)
 	}
+	result, err := s.Collect()
+	if err != nil {
+		t.Fatalf("Ollama JSON Lines 流解析失败: %v", err)
+	}
+	if result.Content != "x" || result.FinishReason != "stop" {
+		t.Fatalf("Ollama JSON Lines 流解析错误: %+v", result)
+	}
+
 	bad := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusBadGateway)
 		_, _ = w.Write([]byte("boom"))
@@ -212,6 +327,82 @@ func TestModels_FetchCacheAndFallback(t *testing.T) {
 	fb := New(WithBaseURL("http://127.0.0.1:1")).Models()
 	if len(fb) < 5 {
 		t.Fatalf("fallback 默认列表应非空: %d", len(fb))
+	}
+}
+
+func TestModels_MapsOllamaCapabilitiesFromTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen3.5:9b","capabilities":["vision","completion","tools","thinking"],"details":{"family":"qwen35","parameter_size":"9.7B","context_length":262144}}]}`))
+	}))
+	defer srv.Close()
+
+	models := New(WithBaseURL(srv.URL)).Models()
+	if len(models) != 1 {
+		t.Fatalf("models length = %d, want 1: %+v", len(models), models)
+	}
+	if !models[0].HasFeature(llm.FeatureVision) {
+		t.Fatalf("qwen3.5:9b should expose FeatureVision, features=%v", models[0].Features)
+	}
+	if !models[0].HasFeature(llm.FeatureFunctions) {
+		t.Fatalf("qwen3.5:9b should expose FeatureFunctions, features=%v", models[0].Features)
+	}
+	if !models[0].HasFeature(llm.FeatureStreaming) {
+		t.Fatalf("ollama models should keep FeatureStreaming, features=%v", models[0].Features)
+	}
+	if models[0].MaxTokens != 262144 {
+		t.Fatalf("context_length should be mapped to MaxTokens, got %d", models[0].MaxTokens)
+	}
+}
+
+func TestModels_ReadsModelFieldFromTags(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+		_, _ = w.Write([]byte(`{"models":[{"model":"qwen3.5:9b","capabilities":["vision"],"details":{"family":"qwen35","parameter_size":"9.7B"}}]}`))
+	}))
+	defer srv.Close()
+
+	models := New(WithBaseURL(srv.URL)).Models()
+	if len(models) != 1 || models[0].ID != "qwen3.5:9b" {
+		t.Fatalf("models should read model field from /api/tags: %+v", models)
+	}
+	if !models[0].HasFeature(llm.FeatureVision) {
+		t.Fatalf("model field response should still map capabilities: %+v", models[0])
+	}
+}
+
+func TestModels_FallsBackToShowCapabilities(t *testing.T) {
+	var showCalls int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		switch r.URL.Path {
+		case "/api/tags":
+			_, _ = w.Write([]byte(`{"models":[{"name":"qwen3.5:9b","details":{"family":"qwen35","parameter_size":"9.7B"}}]}`))
+		case "/api/show":
+			showCalls++
+			var req map[string]string
+			if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+				t.Fatalf("decode /api/show request: %v", err)
+			}
+			if req["model"] != "qwen3.5:9b" {
+				t.Fatalf("/api/show model = %q, want qwen3.5:9b", req["model"])
+			}
+			_, _ = w.Write([]byte(`{"capabilities":["completion","vision"]}`))
+		default:
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+	}))
+	defer srv.Close()
+
+	models := New(WithBaseURL(srv.URL)).Models()
+	if showCalls != 1 {
+		t.Fatalf("/api/show calls = %d, want 1", showCalls)
+	}
+	if len(models) != 1 || !models[0].HasFeature(llm.FeatureVision) {
+		t.Fatalf("show capabilities should mark model as vision-capable: %+v", models)
 	}
 }
 

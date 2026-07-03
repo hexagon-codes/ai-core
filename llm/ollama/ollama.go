@@ -3,10 +3,12 @@ package ollama
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
+	"strconv"
 	"strings"
 	"time"
 
@@ -20,16 +22,24 @@ import (
 const (
 	defaultBaseURL = "http://localhost:11434"
 	defaultModel   = "llama3.2"
+
+	defaultOllamaNumCtx             = 32768
+	maxAutomaticNumCtx              = 32768
+	defaultModelMaxTokens           = 32768
+	ollamaDefaultResponseHeaderWait = 120 * time.Second
+	ollamaStreamResponseHeaderWait  = 10 * time.Minute
 )
 
 // Provider 实现 Ollama LLM 提供者
 type Provider struct {
-	baseURL    string
-	model      string
-	httpClient *http.Client
-	transport  *transport.Transport
-	policy     *llm.NetworkPolicy
-	models     []llm.ModelInfo // 缓存的模型列表
+	baseURL          string
+	model            string
+	httpClient       *http.Client
+	streamHTTPClient *http.Client
+	transport        *transport.Transport
+	streamTransport  *transport.Transport
+	policy           *llm.NetworkPolicy
+	models           []llm.ModelInfo // 缓存的模型列表
 }
 
 // Option 是 Provider 的配置选项
@@ -53,6 +63,7 @@ func WithModel(model string) Option {
 func WithHTTPClient(client *http.Client) Option {
 	return func(p *Provider) {
 		p.httpClient = client
+		p.streamHTTPClient = client
 	}
 }
 
@@ -74,8 +85,9 @@ func New(opts ...Option) *Provider {
 		// 不设全局 Timeout — 流式请求的超时由调用方 context 控制
 		// http.Client.Timeout 对流式响应会在整个读取期间生效，
 		// 本地模型推理可能需要数分钟
-		httpClient: httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
-		policy:     &defaultPolicy,
+		httpClient:       httpx.RawClient(httpx.WithResponseHeaderTimeout(ollamaDefaultResponseHeaderWait)),
+		streamHTTPClient: httpx.RawClient(httpx.WithResponseHeaderTimeout(ollamaStreamResponseHeaderWait)),
+		policy:           &defaultPolicy,
 	}
 
 	// 从环境变量读取
@@ -90,6 +102,7 @@ func New(opts ...Option) *Provider {
 		opt(p)
 	}
 	p.transport = transport.NewTransport(p.httpClient, p.policy)
+	p.streamTransport = transport.NewTransport(p.streamHTTPClient, p.policy)
 
 	return p
 }
@@ -140,8 +153,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
 
-	// Ollama 使用类似 OpenAI 的格式，但需要自定义解析
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat), nil
+	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(&ollamaStreamParser{}), nil
 }
 
 // Models 返回可用模型列表
@@ -236,14 +248,17 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 
 	var result struct {
 		Models []struct {
-			Name       string `json:"name"`
-			Size       int64  `json:"size"`
-			ModifiedAt string `json:"modified_at"`
-			Details    struct {
+			Model        string   `json:"model"`
+			Name         string   `json:"name"`
+			Size         int64    `json:"size"`
+			ModifiedAt   string   `json:"modified_at"`
+			Capabilities []string `json:"capabilities"`
+			Details      struct {
 				Format            string `json:"format"`
 				Family            string `json:"family"`
 				ParameterSize     string `json:"parameter_size"`
 				QuantizationLevel string `json:"quantization_level"`
+				ContextLength     int    `json:"context_length"`
 			} `json:"details"`
 		} `json:"models"`
 	}
@@ -252,18 +267,79 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 		return nil, err
 	}
 
-	models := make([]llm.ModelInfo, len(result.Models))
-	for i, m := range result.Models {
-		models[i] = llm.ModelInfo{
-			ID:          m.Name,
-			Name:        m.Name,
-			Description: fmt.Sprintf("%s model (%s)", m.Details.Family, m.Details.ParameterSize),
-			MaxTokens:   32768, // 默认值，Ollama 不提供此信息
-			Features:    []string{llm.FeatureStreaming},
+	models := make([]llm.ModelInfo, 0, len(result.Models))
+	for _, m := range result.Models {
+		modelID := strings.TrimSpace(m.Name)
+		if modelID == "" {
+			modelID = strings.TrimSpace(m.Model)
 		}
+		if modelID == "" {
+			continue
+		}
+		capabilities := m.Capabilities
+		if len(capabilities) == 0 {
+			if showCaps, err := p.fetchModelCapabilities(context.Background(), modelID); err == nil {
+				capabilities = showCaps
+			}
+		}
+		maxTokens := m.Details.ContextLength
+		if maxTokens <= 0 {
+			maxTokens = defaultModelMaxTokens
+		}
+		models = append(models, llm.ModelInfo{
+			ID:          modelID,
+			Name:        modelID,
+			Description: fmt.Sprintf("%s model (%s)", m.Details.Family, m.Details.ParameterSize),
+			MaxTokens:   maxTokens,
+			Features:    ollamaCapabilitiesToFeatures(capabilities),
+		})
 	}
 
 	return models, nil
+}
+
+func (p *Provider) fetchModelCapabilities(ctx context.Context, model string) ([]string, error) {
+	body, err := json.Marshal(map[string]string{"model": model})
+	if err != nil {
+		return nil, err
+	}
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/show", body, false)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	var result struct {
+		Capabilities []string `json:"capabilities"`
+	}
+	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		return nil, err
+	}
+	return result.Capabilities, nil
+}
+
+func ollamaCapabilitiesToFeatures(capabilities []string) []string {
+	features := []string{llm.FeatureStreaming}
+	seen := map[string]bool{llm.FeatureStreaming: true}
+	add := func(feature string) {
+		if feature == "" || seen[feature] {
+			return
+		}
+		features = append(features, feature)
+		seen[feature] = true
+	}
+
+	for _, capability := range capabilities {
+		switch strings.ToLower(strings.TrimSpace(capability)) {
+		case "vision":
+			add(llm.FeatureVision)
+		case "tools", "tool", "function", "functions":
+			add(llm.FeatureFunctions)
+		case "embedding", "embeddings", "embed":
+			add(llm.FeatureEmbedding)
+		}
+	}
+	return features
 }
 
 // CountTokens 计算消息的 Token 数量（简化实现）
@@ -278,9 +354,14 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 
 // buildRequestBody 构建请求体
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, error) {
+	messages, err := convertMessagesForOllama(req.Messages)
+	if err != nil {
+		return nil, err
+	}
+
 	payload := map[string]any{
 		"model":    req.Model,
-		"messages": openai.ConvertMessages(req.Messages),
+		"messages": messages,
 		"stream":   stream,
 	}
 	if think, ok := ollamaThinkFromMetadata(req.Metadata); ok {
@@ -300,6 +381,9 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	}
 	if len(req.Stop) > 0 {
 		options["stop"] = req.Stop
+	}
+	if numCtx := p.numCtxForRequest(req); numCtx > 0 {
+		options["num_ctx"] = numCtx
 	}
 
 	if len(options) > 0 {
@@ -323,7 +407,139 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	return json.Marshal(payload)
 }
 
-func ollamaThinkFromMetadata(metadata map[string]any) (bool, bool) {
+func (p *Provider) numCtxForRequest(req llm.CompletionRequest) int {
+	if numCtx, ok := ollamaNumCtxFromMetadata(req.Metadata); ok {
+		return numCtx
+	}
+	for _, model := range p.models {
+		if model.ID == req.Model || model.Name == req.Model {
+			return clampAutomaticNumCtx(model.MaxTokens)
+		}
+	}
+	return defaultOllamaNumCtx
+}
+
+func clampAutomaticNumCtx(contextLength int) int {
+	if contextLength <= 0 {
+		return defaultOllamaNumCtx
+	}
+	if contextLength > maxAutomaticNumCtx {
+		return maxAutomaticNumCtx
+	}
+	return contextLength
+}
+
+func ollamaNumCtxFromMetadata(metadata map[string]any) (int, bool) {
+	if len(metadata) == 0 {
+		return 0, false
+	}
+	for _, key := range []string{"num_ctx", "ollama_num_ctx", "context_length", "max_context_tokens"} {
+		if value, exists := metadata[key]; exists {
+			if numCtx, ok := positiveInt(value); ok {
+				return numCtx, true
+			}
+		}
+	}
+	return 0, false
+}
+
+func positiveInt(value any) (int, bool) {
+	switch v := value.(type) {
+	case int:
+		return v, v > 0
+	case int64:
+		return int(v), v > 0
+	case int32:
+		return int(v), v > 0
+	case float64:
+		return int(v), v > 0
+	case float32:
+		return int(v), v > 0
+	case json.Number:
+		n, err := strconv.Atoi(v.String())
+		return n, err == nil && n > 0
+	case string:
+		n, err := strconv.Atoi(strings.TrimSpace(v))
+		return n, err == nil && n > 0
+	default:
+		return 0, false
+	}
+}
+
+func convertMessagesForOllama(messages []llm.Message) ([]map[string]any, error) {
+	converted := openai.ConvertMessages(messages)
+	for _, msg := range converted {
+		contentParts, ok := contentPartsFromOpenAIMessage(msg["content"])
+		if !ok {
+			continue
+		}
+
+		texts := make([]string, 0, len(contentParts))
+		images := make([]string, 0)
+		for _, part := range contentParts {
+			partType, _ := part["type"].(string)
+			switch partType {
+			case "image_url":
+				imageURL, _ := part["image_url"].(map[string]any)
+				rawURL, _ := imageURL["url"].(string)
+				payload, err := ollamaImagePayload(rawURL)
+				if err != nil {
+					return nil, err
+				}
+				images = append(images, payload)
+			default:
+				if text, _ := part["text"].(string); text != "" {
+					texts = append(texts, text)
+				}
+			}
+		}
+
+		msg["content"] = strings.Join(texts, "\n")
+		if len(images) > 0 {
+			msg["images"] = images
+		}
+	}
+	return converted, nil
+}
+
+func contentPartsFromOpenAIMessage(content any) ([]map[string]any, bool) {
+	switch parts := content.(type) {
+	case []map[string]any:
+		return parts, true
+	case []any:
+		result := make([]map[string]any, 0, len(parts))
+		for _, part := range parts {
+			m, ok := part.(map[string]any)
+			if !ok {
+				return nil, false
+			}
+			result = append(result, m)
+		}
+		return result, true
+	default:
+		return nil, false
+	}
+}
+
+func ollamaImagePayload(raw string) (string, error) {
+	payload := strings.TrimSpace(raw)
+	if payload == "" {
+		return "", fmt.Errorf("ollama image content is empty")
+	}
+	if strings.HasPrefix(strings.ToLower(payload), "data:") {
+		comma := strings.Index(payload, ",")
+		if comma < 0 {
+			return "", fmt.Errorf("ollama image data URI missing base64 payload")
+		}
+		payload = strings.TrimSpace(payload[comma+1:])
+	}
+	if _, err := base64.StdEncoding.DecodeString(payload); err != nil {
+		return "", fmt.Errorf("ollama image content must be base64 or data URI: %w", err)
+	}
+	return payload, nil
+}
+
+func ollamaThinkFromMetadata(metadata map[string]any) (any, bool) {
 	if len(metadata) == 0 {
 		return false, false
 	}
@@ -341,6 +557,8 @@ func ollamaThinkFromMetadata(metadata map[string]any) (bool, bool) {
 				return true, true
 			case "off", "false", "0", "no", "disabled":
 				return false, true
+			case "low", "medium", "high":
+				return strings.ToLower(strings.TrimSpace(v)), true
 			}
 		}
 	}
@@ -354,6 +572,7 @@ type ollamaResponse struct {
 	Message   struct {
 		Role      string `json:"role"`
 		Content   string `json:"content"`
+		Thinking  string `json:"thinking,omitempty"`
 		ToolCalls []struct {
 			Function struct {
 				Name      string         `json:"name"`
@@ -361,13 +580,15 @@ type ollamaResponse struct {
 			} `json:"function"`
 		} `json:"tool_calls,omitempty"`
 	} `json:"message"`
-	Done               bool `json:"done"`
-	TotalDuration      int  `json:"total_duration"`
-	LoadDuration       int  `json:"load_duration"`
-	PromptEvalCount    int  `json:"prompt_eval_count"`
-	PromptEvalDuration int  `json:"prompt_eval_duration"`
-	EvalCount          int  `json:"eval_count"`
-	EvalDuration       int  `json:"eval_duration"`
+	Error              string `json:"error,omitempty"`
+	Done               bool   `json:"done"`
+	DoneReason         string `json:"done_reason"`
+	TotalDuration      int    `json:"total_duration"`
+	LoadDuration       int    `json:"load_duration"`
+	PromptEvalCount    int    `json:"prompt_eval_count"`
+	PromptEvalDuration int    `json:"prompt_eval_duration"`
+	EvalCount          int    `json:"eval_count"`
+	EvalDuration       int    `json:"eval_duration"`
 }
 
 // parseResponse 解析响应
@@ -401,6 +622,54 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 	return result
 }
 
+type ollamaStreamParser struct{}
+
+func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
+	var resp ollamaResponse
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return nil, err
+	}
+	if resp.Error != "" {
+		return nil, fmt.Errorf("ollama stream error: %s", resp.Error)
+	}
+
+	chunk := &streamx.Chunk{
+		ID:        resp.CreatedAt,
+		Model:     resp.Model,
+		Role:      resp.Message.Role,
+		Content:   resp.Message.Content,
+		Reasoning: resp.Message.Thinking,
+		Raw:       data,
+	}
+	if resp.Done {
+		chunk.FinishReason = resp.DoneReason
+		if chunk.FinishReason == "" {
+			chunk.FinishReason = "stop"
+		}
+	}
+	for i, tc := range resp.Message.ToolCalls {
+		args, _ := json.Marshal(tc.Function.Arguments)
+		chunk.ToolCalls = append(chunk.ToolCalls, streamx.ToolCall{
+			Index:     i,
+			ID:        fmt.Sprintf("call_%d", i),
+			Type:      "function",
+			Name:      tc.Function.Name,
+			Arguments: string(args),
+		})
+	}
+	return chunk, nil
+}
+
+func (p *ollamaStreamParser) IsDone(data []byte) bool {
+	var resp struct {
+		Done bool `json:"done"`
+	}
+	if err := json.Unmarshal(data, &resp); err != nil {
+		return false
+	}
+	return resp.Done
+}
+
 // Ping 检查 Ollama 服务是否可用
 func (p *Provider) Ping(ctx context.Context) error {
 	resp, err := p.doRequest(ctx, http.MethodGet, p.baseURL+"/api/tags", nil, false)
@@ -430,14 +699,20 @@ func (p *Provider) PullModel(ctx context.Context, model string) error {
 }
 
 func (p *Provider) doRequest(ctx context.Context, method, url string, body []byte, stream bool) (*http.Response, error) {
+	client := p.httpClient
+	requestTransport := p.transport
+	if stream {
+		client = p.streamHTTPClient
+		requestTransport = p.streamTransport
+	}
 	cfg := transport.Request{
 		Provider:  p.Name(),
 		Action:    strings.TrimPrefix(strings.TrimPrefix(url, strings.TrimRight(p.baseURL, "/")), "/"),
 		Method:    method,
 		URL:       url,
 		Body:      body,
-		Client:    p.httpClient,
-		Transport: p.transport,
+		Client:    client,
+		Transport: requestTransport,
 	}
 	if body != nil {
 		cfg.SetHeaders = func(r *http.Request) {
