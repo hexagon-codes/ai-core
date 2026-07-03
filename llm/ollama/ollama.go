@@ -474,6 +474,13 @@ func positiveInt(value any) (int, bool) {
 func convertMessagesForOllama(messages []llm.Message) ([]map[string]any, error) {
 	converted := openai.ConvertMessages(messages)
 	for _, msg := range converted {
+		// tool_calls[].function.arguments 归一化：OpenAI 协议把参数序列化为 JSON
+		// 字符串，但 Ollama 原生 /api/chat 要求它是 JSON 对象，收到字符串会返回
+		// 400 "Value looks like object, but can't find closing '}' symbol"。
+		// 必须在 content 处理前跑——assistant+tool_calls 消息的 content 为 nil，
+		// 会走下面的 continue 分支跳过。
+		normalizeOllamaToolCallArguments(msg)
+
 		contentParts, ok := contentPartsFromOpenAIMessage(msg["content"])
 		if !ok {
 			continue
@@ -515,6 +522,38 @@ func convertMessagesForOllama(messages []llm.Message) ([]map[string]any, error) 
 		}
 	}
 	return converted, nil
+}
+
+// normalizeOllamaToolCallArguments 把消息里 tool_calls[].function.arguments 从
+// OpenAI 风格的 JSON 字符串转成 Ollama 原生要求的 JSON 对象。
+//
+// openai.ConvertMessages 遵循 OpenAI /v1/chat/completions 协议，arguments 恒为字符串；
+// Ollama /api/chat 却要求对象，收到字符串会返回 400。这里就地改写 map 值：
+//   - 合法 JSON 对象字符串 → 解析为 map[string]any
+//   - 空串（无参工具）或无法解析为对象 → 归一化为空对象 {}（避免透传字符串触发 400）
+func normalizeOllamaToolCallArguments(msg map[string]any) {
+	calls, ok := msg["tool_calls"].([]map[string]any)
+	if !ok {
+		return
+	}
+	for _, call := range calls {
+		fn, ok := call["function"].(map[string]any)
+		if !ok {
+			continue
+		}
+		argStr, ok := fn["arguments"].(string)
+		if !ok {
+			// 已是对象或缺省，无需处理
+			continue
+		}
+		obj := map[string]any{}
+		if trimmed := strings.TrimSpace(argStr); trimmed != "" {
+			if err := json.Unmarshal([]byte(trimmed), &obj); err != nil {
+				obj = map[string]any{}
+			}
+		}
+		fn["arguments"] = obj
+	}
 }
 
 func contentPartsFromOpenAIMessage(content any) ([]map[string]any, bool) {
