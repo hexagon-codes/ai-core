@@ -1,7 +1,6 @@
 package voice
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,6 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/media"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -25,6 +27,8 @@ type AzureSTT struct {
 	// 为空时回退到 https://{region}.stt.speech.microsoft.com 的官方端点。
 	baseURL string
 	client  *http.Client
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // AzureSTTOption 配置选项
@@ -48,6 +52,11 @@ func AzureSTTWithHTTPClient(c *http.Client) AzureSTTOption {
 	return func(s *AzureSTT) { s.client = c }
 }
 
+// AzureSTTWithNetworkPolicy 设置上游网络出口约束。
+func AzureSTTWithNetworkPolicy(policy llm.NetworkPolicy) AzureSTTOption {
+	return func(s *AzureSTT) { s.policy = cloneVoiceNetworkPolicy(&policy) }
+}
+
 // NewAzureSTT 创建 Azure STT Provider
 func NewAzureSTT(subscriptionKey, region string, opts ...AzureSTTOption) *AzureSTT {
 	s := &AzureSTT{
@@ -59,6 +68,7 @@ func NewAzureSTT(subscriptionKey, region string, opts ...AzureSTTOption) *AzureS
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.tx = transport.NewTransport(s.client, s.policy)
 	return s
 }
 
@@ -90,11 +100,6 @@ func (s *AzureSTT) Transcribe(ctx context.Context, audio []byte, opts Transcribe
 	url := fmt.Sprintf("%s/speech/recognition/conversation/cognitiveservices/v1?language=%s&format=detailed",
 		strings.TrimRight(base, "/"), lang)
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(audio))
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	req.Header.Set("Ocp-Apim-Subscription-Key", s.subscriptionKey)
 	contentType := "audio/wav"
 	switch opts.Format {
 	case "mp3":
@@ -104,18 +109,27 @@ func (s *AzureSTT) Transcribe(ctx context.Context, audio []byte, opts Transcribe
 	case "flac":
 		contentType = "audio/flac"
 	}
-	req.Header.Set("Content-Type", contentType)
-
-	resp, err := s.client.Do(req)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  s.Name(),
+		Action:    "transcribe",
+		Method:    http.MethodPost,
+		URL:       url,
+		Body:      audio,
+		Client:    s.client,
+		Transport: s.tx,
+		Retry:     media.SubmitRetryPolicy(opts.IdempotencyKey),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Ocp-Apim-Subscription-Key", s.subscriptionKey)
+			r.Header.Set("Content-Type", contentType)
+			if opts.IdempotencyKey != "" {
+				r.Header.Set("Idempotency-Key", opts.IdempotencyKey)
+			}
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("请求 Azure STT 失败: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("azure STT 返回 %d: %s", resp.StatusCode, string(body))
-	}
 
 	var result azureSTTResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -132,6 +146,7 @@ func (s *AzureSTT) Transcribe(ctx context.Context, audio []byte, opts Transcribe
 		Language:   lang,
 		Duration:   float64(result.Duration) / 10000000, // ticks to seconds
 		Confidence: confidence,
+		RequestID:  requestIDFromHeader(resp.Header),
 	}, nil
 }
 
@@ -159,6 +174,8 @@ type AzureTTS struct {
 	// 为空时回退到 https://{region}.tts.speech.microsoft.com 的官方端点。
 	baseURL string
 	client  *http.Client
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // AzureTTSOption 配置选项
@@ -182,6 +199,11 @@ func AzureTTSWithHTTPClient(c *http.Client) AzureTTSOption {
 	return func(t *AzureTTS) { t.client = c }
 }
 
+// AzureTTSWithNetworkPolicy 设置上游网络出口约束。
+func AzureTTSWithNetworkPolicy(policy llm.NetworkPolicy) AzureTTSOption {
+	return func(t *AzureTTS) { t.policy = cloneVoiceNetworkPolicy(&policy) }
+}
+
 // NewAzureTTS 创建 Azure TTS Provider
 func NewAzureTTS(subscriptionKey, region string, opts ...AzureTTSOption) *AzureTTS {
 	t := &AzureTTS{
@@ -193,6 +215,7 @@ func NewAzureTTS(subscriptionKey, region string, opts ...AzureTTSOption) *AzureT
 	for _, opt := range opts {
 		opt(t)
 	}
+	t.tx = transport.NewTransport(t.client, t.policy)
 	return t
 }
 
@@ -240,13 +263,6 @@ func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeO
 	}
 	url := fmt.Sprintf("%s/cognitiveservices/v1", strings.TrimRight(base, "/"))
 
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewBufferString(ssml))
-	if err != nil {
-		return nil, fmt.Errorf("创建请求失败: %w", err)
-	}
-	req.Header.Set("Ocp-Apim-Subscription-Key", t.subscriptionKey)
-	req.Header.Set("Content-Type", "application/ssml+xml")
-
 	outputFormat := "audio-16khz-128kbitrate-mono-mp3"
 	switch format {
 	case FormatWAV:
@@ -254,18 +270,28 @@ func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeO
 	case FormatOGG:
 		outputFormat = "ogg-16khz-16bit-mono-opus"
 	}
-	req.Header.Set("X-Microsoft-OutputFormat", outputFormat)
-
-	resp, err := t.client.Do(req)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  t.Name(),
+		Action:    "synthesize",
+		Method:    http.MethodPost,
+		URL:       url,
+		Body:      []byte(ssml),
+		Client:    t.client,
+		Transport: t.tx,
+		Retry:     media.SubmitRetryPolicy(opts.IdempotencyKey),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Ocp-Apim-Subscription-Key", t.subscriptionKey)
+			r.Header.Set("Content-Type", "application/ssml+xml")
+			r.Header.Set("X-Microsoft-OutputFormat", outputFormat)
+			if opts.IdempotencyKey != "" {
+				r.Header.Set("Idempotency-Key", opts.IdempotencyKey)
+			}
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("请求 Azure TTS 失败: %w", err)
 	}
 	defer resp.Body.Close()
-
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(resp.Body)
-		return nil, fmt.Errorf("azure TTS 返回 %d: %s", resp.StatusCode, string(body))
-	}
 
 	audio, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB 限制
 	if err != nil {
@@ -273,9 +299,10 @@ func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeO
 	}
 
 	return &SynthesizeResult{
-		Audio:  audio,
-		Format: format,
-		Size:   len(audio),
+		Audio:     audio,
+		Format:    format,
+		Size:      len(audio),
+		RequestID: requestIDFromHeader(resp.Header),
 	}, nil
 }
 

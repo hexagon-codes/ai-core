@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"mime/multipart"
@@ -12,6 +13,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/media"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -57,6 +61,8 @@ type OpenAISTT struct {
 	model   string
 	baseURL string
 	client  *http.Client
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // STTOption OpenAI STT 配置选项函数
@@ -75,6 +81,11 @@ func STTWithBaseURL(url string) STTOption {
 // 用于自定义超时、代理等 HTTP 配置。
 func STTWithHTTPClient(client *http.Client) STTOption {
 	return func(s *OpenAISTT) { s.client = client }
+}
+
+// STTWithNetworkPolicy 设置上游网络出口约束。
+func STTWithNetworkPolicy(policy llm.NetworkPolicy) STTOption {
+	return func(s *OpenAISTT) { s.policy = cloneVoiceNetworkPolicy(&policy) }
 }
 
 // NewOpenAISTT 创建 OpenAI Whisper STT Provider
@@ -96,6 +107,7 @@ func NewOpenAISTT(apiKey, model string, opts ...STTOption) *OpenAISTT {
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.tx = transport.NewTransport(s.client, s.policy)
 	return s
 }
 
@@ -167,26 +179,25 @@ func (s *OpenAISTT) Transcribe(ctx context.Context, audio []byte, opts Transcrib
 	_ = w.WriteField("response_format", "verbose_json")
 	w.Close()
 
-	// 发送 HTTP 请求
-	url := s.baseURL + "/audio/transcriptions"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, &buf)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  s.Name(),
+		Action:    "stt.transcribe",
+		Method:    http.MethodPost,
+		URL:       s.baseURL + "/audio/transcriptions",
+		Body:      buf.Bytes(),
+		Client:    s.client,
+		Transport: s.tx,
+		// 本 Provider 不向上游透传幂等键，计费型转录 POST 一律不重试。
+		Retry: media.SubmitRetryPolicy(""),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+s.apiKey)
+			r.Header.Set("Content-Type", w.FormDataContentType())
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+s.apiKey)
-	req.Header.Set("Content-Type", w.FormDataContentType())
-
-	resp, err := s.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 STT API 失败: %w", err)
+		return nil, fmt.Errorf("请求 STT API 失败: %w", sanitizeProviderError(err))
 	}
 	defer resp.Body.Close()
-
-	// 检查响应状态码（限 64KB 错误体，脱敏内部 URL / stack trace）
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return nil, fmt.Errorf("stt API 返回 %d: %s", resp.StatusCode, sanitizeUpstreamError(body))
-	}
 
 	// 解析响应
 	var result whisperResponse
@@ -195,9 +206,10 @@ func (s *OpenAISTT) Transcribe(ctx context.Context, audio []byte, opts Transcrib
 	}
 
 	return &TranscribeResult{
-		Text:     result.Text,
-		Language: result.Language,
-		Duration: result.Duration,
+		Text:      result.Text,
+		Language:  result.Language,
+		Duration:  result.Duration,
+		RequestID: resp.Header.Get("request-id"),
 	}, nil
 }
 
@@ -227,6 +239,8 @@ type OpenAITTS struct {
 	model   string
 	baseURL string
 	client  *http.Client
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // TTSOption OpenAI TTS 配置选项函数
@@ -244,6 +258,11 @@ func TTSWithBaseURL(url string) TTSOption {
 // 用于自定义超时、代理等 HTTP 配置。
 func TTSWithHTTPClient(client *http.Client) TTSOption {
 	return func(t *OpenAITTS) { t.client = client }
+}
+
+// TTSWithNetworkPolicy 设置上游网络出口约束。
+func TTSWithNetworkPolicy(policy llm.NetworkPolicy) TTSOption {
+	return func(t *OpenAITTS) { t.policy = cloneVoiceNetworkPolicy(&policy) }
 }
 
 // NewOpenAITTS 创建 OpenAI TTS Provider
@@ -265,6 +284,7 @@ func NewOpenAITTS(apiKey, model string, opts ...TTSOption) *OpenAITTS {
 	for _, opt := range opts {
 		opt(t)
 	}
+	t.tx = transport.NewTransport(t.client, t.policy)
 	return t
 }
 
@@ -329,26 +349,25 @@ func (t *OpenAITTS) Synthesize(ctx context.Context, text string, opts Synthesize
 		"speed":           speed,
 	})
 
-	// 发送 HTTP 请求
-	url := t.baseURL + "/audio/speech"
-	req, err := http.NewRequestWithContext(ctx, "POST", url, bytes.NewReader(reqBody))
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  t.Name(),
+		Action:    "tts.synthesize",
+		Method:    http.MethodPost,
+		URL:       t.baseURL + "/audio/speech",
+		Body:      reqBody,
+		Client:    t.client,
+		Transport: t.tx,
+		// 本 Provider 不向上游透传幂等键，计费型合成 POST 一律不重试。
+		Retry: media.SubmitRetryPolicy(""),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+t.apiKey)
+			r.Header.Set("Content-Type", "application/json")
+		},
+	})
 	if err != nil {
-		return nil, fmt.Errorf("创建 HTTP 请求失败: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+t.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.client.Do(req)
-	if err != nil {
-		return nil, fmt.Errorf("请求 TTS API 失败: %w", err)
+		return nil, fmt.Errorf("请求 TTS API 失败: %w", sanitizeProviderError(err))
 	}
 	defer resp.Body.Close()
-
-	// 检查响应状态码（限 64KB 错误体，脱敏）
-	if resp.StatusCode != http.StatusOK {
-		body, _ := io.ReadAll(io.LimitReader(resp.Body, 64<<10))
-		return nil, fmt.Errorf("tts API 返回 %d: %s", resp.StatusCode, sanitizeUpstreamError(body))
-	}
 
 	// 读取音频数据（50MB 限制）
 	audio, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
@@ -357,8 +376,25 @@ func (t *OpenAITTS) Synthesize(ctx context.Context, text string, opts Synthesize
 	}
 
 	return &SynthesizeResult{
-		Audio:  audio,
-		Format: format,
-		Size:   len(audio),
+		Audio:     audio,
+		Format:    format,
+		Size:      len(audio),
+		RequestID: resp.Header.Get("request-id"),
 	}, nil
+}
+
+func sanitizeProviderError(err error) error {
+	var providerErr *llm.ProviderError
+	if !errors.As(err, &providerErr) {
+		return err
+	}
+	cloned := *providerErr
+	if cloned.Body != "" {
+		cloned.Body = sanitizeUpstreamError([]byte(cloned.Body))
+		cloned.BodyTruncated = providerErr.BodyTruncated
+	}
+	if cloned.RequestPreview != "" {
+		cloned.RequestPreview = sanitizeUpstreamError([]byte(cloned.RequestPreview))
+	}
+	return &cloned
 }

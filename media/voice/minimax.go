@@ -21,7 +21,6 @@
 package voice
 
 import (
-	"bytes"
 	"context"
 	"encoding/hex"
 	"encoding/json"
@@ -31,6 +30,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/media"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -41,6 +43,8 @@ type MiniMaxTTS struct {
 	baseURL string
 	model   string
 	client  *http.Client
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // MiniMaxTTSOption 配置 MiniMaxTTS。
@@ -61,6 +65,11 @@ func WithMiniMaxHTTPClient(c *http.Client) MiniMaxTTSOption {
 	return func(t *MiniMaxTTS) { t.client = c }
 }
 
+// WithMiniMaxNetworkPolicy 设置上游网络出口约束。
+func WithMiniMaxNetworkPolicy(policy llm.NetworkPolicy) MiniMaxTTSOption {
+	return func(t *MiniMaxTTS) { t.policy = cloneVoiceNetworkPolicy(&policy) }
+}
+
 // NewMiniMaxTTS 构造 MiniMax TTS。apiKey/groupID 不能为空。
 func NewMiniMaxTTS(apiKey, groupID string, opts ...MiniMaxTTSOption) *MiniMaxTTS {
 	t := &MiniMaxTTS{
@@ -75,6 +84,7 @@ func NewMiniMaxTTS(apiKey, groupID string, opts ...MiniMaxTTSOption) *MiniMaxTTS
 	for _, opt := range opts {
 		opt(t)
 	}
+	t.tx = transport.NewTransport(t.client, t.policy)
 	return t
 }
 
@@ -135,22 +145,31 @@ func (t *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts Synthesiz
 	payload, _ := json.Marshal(body)
 
 	url := fmt.Sprintf("%s/v1/t2a_v2?GroupId=%s", strings.TrimRight(t.baseURL, "/"), t.groupID)
-	req, err := http.NewRequestWithContext(ctx, http.MethodPost, url, bytes.NewReader(payload))
-	if err != nil {
-		return nil, fmt.Errorf("minimax: build request: %w", err)
-	}
-	req.Header.Set("Authorization", "Bearer "+t.apiKey)
-	req.Header.Set("Content-Type", "application/json")
-
-	resp, err := t.client.Do(req)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  t.Name(),
+		Action:    "synthesize",
+		Method:    http.MethodPost,
+		URL:       url,
+		Body:      payload,
+		Client:    t.client,
+		Transport: t.tx,
+		Retry:     media.SubmitRetryPolicy(opts.IdempotencyKey),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+t.apiKey)
+			r.Header.Set("Content-Type", "application/json")
+			if opts.IdempotencyKey != "" {
+				r.Header.Set("Idempotency-Key", opts.IdempotencyKey)
+			}
+		},
+	})
 	if err != nil {
 		return nil, fmt.Errorf("minimax: http: %w", err)
 	}
 	defer resp.Body.Close()
 
-	respBody, _ := io.ReadAll(resp.Body)
-	if resp.StatusCode != http.StatusOK {
-		return nil, fmt.Errorf("minimax: http %d: %s", resp.StatusCode, string(respBody))
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 120<<20))
+	if err != nil {
+		return nil, fmt.Errorf("minimax: read response: %w", err)
 	}
 
 	var parsed struct {
@@ -177,8 +196,9 @@ func (t *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts Synthesiz
 		return nil, fmt.Errorf("minimax: decode hex audio: %w", err)
 	}
 	return &SynthesizeResult{
-		Audio:  audio,
-		Format: FormatMP3,
-		Size:   len(audio),
+		Audio:     audio,
+		Format:    FormatMP3,
+		Size:      len(audio),
+		RequestID: requestIDFromHeader(resp.Header),
 	}, nil
 }

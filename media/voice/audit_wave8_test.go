@@ -30,6 +30,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/media"
 )
 
@@ -182,6 +183,20 @@ func TestOpenAISTT_Transcribe_Non200Sanitized(t *testing.T) {
 	}
 }
 
+func TestOpenAISTT_NetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	stt := NewOpenAISTT("sk-x", "whisper-1",
+		STTWithBaseURL("http://127.0.0.1:1"),
+		STTWithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := stt.Transcribe(context.Background(), []byte("audio"), TranscribeOptions{})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
+	}
+}
+
 func TestOpenAISTT_Transcribe_BadJSON(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = io.WriteString(w, `{not-json`)
@@ -331,6 +346,20 @@ func TestOpenAITTS_Synthesize_Non200(t *testing.T) {
 	_, err := tts.Synthesize(context.Background(), "hi", SynthesizeOptions{})
 	if err == nil || !strings.Contains(err.Error(), "429") {
 		t.Errorf("应返回含 429 的错误, got %v", err)
+	}
+}
+
+func TestOpenAITTS_NetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	tts := NewOpenAITTS("sk-x", "tts-1",
+		TTSWithBaseURL("http://127.0.0.1:1"),
+		TTSWithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := tts.Synthesize(context.Background(), "hi", SynthesizeOptions{})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
 	}
 }
 
@@ -507,6 +536,37 @@ func TestMiniMaxTTS_Synthesize_HTTPError(t *testing.T) {
 		t.Errorf("应返回含 403 的错误, got %v", err)
 	}
 }
+
+func TestMiniMaxTTS_Synthesize_ReadError(t *testing.T) {
+	tts := NewMiniMaxTTS("k", "g",
+		WithMiniMaxBaseURL("https://example.com"),
+		WithMiniMaxHTTPClient(&http.Client{Transport: readErrorRoundTripper{}}),
+	)
+	_, err := tts.Synthesize(context.Background(), "hi", SynthesizeOptions{})
+	if err == nil {
+		t.Fatal("read error should be returned")
+	}
+	if !strings.Contains(err.Error(), "read response") {
+		t.Fatalf("expected read response error, got %v", err)
+	}
+}
+
+type readErrorRoundTripper struct{}
+
+func (readErrorRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	return &http.Response{
+		StatusCode: http.StatusOK,
+		Status:     "200 OK",
+		Header:     make(http.Header),
+		Body:       readErrorBody{},
+		Request:    req,
+	}, nil
+}
+
+type readErrorBody struct{}
+
+func (readErrorBody) Read([]byte) (int, error) { return 0, errors.New("read boom") }
+func (readErrorBody) Close() error             { return nil }
 
 func TestMiniMaxTTS_Synthesize_BaseURLTrailingSlash(t *testing.T) {
 	var gotURL string
