@@ -3,12 +3,15 @@ package video
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/llm"
 )
 
 // ============================================================================
@@ -134,8 +137,8 @@ func TestResolveByTaskID_Edges(t *testing.T) {
 	}{
 		{"正常", "zhipu::raw-1", false, "raw-1"},
 		{"无前缀", "raw-1", true, ""},
-		{"空前缀", "::raw-1", true, ""},             // name="" 查不到 provider
-		{"空raw", "zhipu::", false, ""},            // raw 为空但 provider 合法（degenerate, 见 findings）
+		{"空前缀", "::raw-1", true, ""},            // name="" 查不到 provider
+		{"空raw", "zhipu::", false, ""},          // raw 为空但 provider 合法（degenerate, 见 findings）
 		{"多重双冒号", "zhipu::a::b", false, "a::b"}, // strings.Cut 只切第一个
 		{"未知provider", "ghost::raw", true, ""},
 		{"完全空串", "", true, ""},
@@ -244,7 +247,7 @@ func newZhipuWithServer(apiKey, baseURL string) *zhipuCogVideoX {
 // TestZhipu_HTTPClientInjectable 验证 zhipu Provider 提供 httpClient 注入点。
 //
 // 回归: zhipuCogVideoX 固定使用 http.DefaultClient，无 httpClient 注入点
-//（共享全局 client、超时不可控）。修复后应通过 WithHTTPClient 注入自定义
+// （共享全局 client、超时不可控）。修复后应通过 WithHTTPClient 注入自定义
 // client，且默认仍可用（不破坏既有 NewZhipuCogVideoX 签名）。
 func TestZhipu_HTTPClientInjectable(t *testing.T) {
 	// 1) 默认应得到非 nil 的 client（不再硬编码裸全局单例的隐式依赖）。
@@ -301,6 +304,19 @@ func TestZhipu_Submit_NoAPIKey(t *testing.T) {
 	}
 	if hit {
 		t.Error("无 key 不应发起 HTTP 请求")
+	}
+}
+
+func TestZhipu_NetworkPolicyBlocksPrivateBaseURL(t *testing.T) {
+	p := NewZhipuCogVideoX("secret-key", "http://127.0.0.1:1",
+		WithNetworkPolicy(llm.NetworkPolicy{AllowHTTP: true}),
+	)
+	_, err := p.Submit(context.Background(), Request{Prompt: "hi", Model: "cogvideox-2"})
+	if err == nil {
+		t.Fatal("NetworkPolicy should block private baseURL")
+	}
+	if !errors.Is(err, llm.ErrNetworkPolicy) {
+		t.Fatalf("expected ErrNetworkPolicy, got %v", err)
 	}
 }
 
@@ -678,9 +694,9 @@ func TestSubmitAndWait_PollUntilDone(t *testing.T) {
 // TestSubmitAndWait_PollError 轮询出错应透传，last 为上次成功状态（可能零值）。
 func TestSubmitAndWait_PollError(t *testing.T) {
 	p := &sequenceProvider{
-		name:    "x",
-		models:  []string{"m"},
-		statuses: []TaskStatus{{Status: "running", Done: false}},
+		name:      "x",
+		models:    []string{"m"},
+		statuses:  []TaskStatus{{Status: "running", Done: false}},
 		pollErrAt: 2, // 第 2 次轮询返回错误
 		pollErr:   errPollBoom,
 	}
@@ -975,7 +991,7 @@ type sequenceProvider struct {
 	models    []string
 	statuses  []TaskStatus
 	pollCall  int
-	pollErrAt int   // 第几次 Poll 返回错误（1-based, 0 表示不注入）
+	pollErrAt int // 第几次 Poll 返回错误（1-based, 0 表示不注入）
 	pollErr   error
 }
 

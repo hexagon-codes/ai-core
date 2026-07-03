@@ -1,14 +1,16 @@
 package video
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
+
+	"github.com/hexagon-codes/ai-core/llm"
+	"github.com/hexagon-codes/ai-core/media"
+	"github.com/hexagon-codes/ai-core/transport"
 )
 
 // 智谱视频生成 endpoint：
@@ -26,6 +28,8 @@ type zhipuCogVideoX struct {
 	models  []string
 	httpc   *http.Client
 	timeout time.Duration
+	policy  *llm.NetworkPolicy
+	tx      *transport.Transport
 }
 
 // ZhipuOption 配置 zhipu CogVideoX Provider 的可选项。
@@ -44,6 +48,13 @@ func WithHTTPClient(c *http.Client) ZhipuOption {
 		if c != nil {
 			z.httpc = c
 		}
+	}
+}
+
+// WithNetworkPolicy 设置上游网络出口约束。
+func WithNetworkPolicy(policy llm.NetworkPolicy) ZhipuOption {
+	return func(z *zhipuCogVideoX) {
+		z.policy = transport.CloneNetworkPolicy(&policy)
 	}
 }
 
@@ -70,6 +81,7 @@ func NewZhipuCogVideoX(apiKey, baseURL string, opts ...ZhipuOption) Provider {
 			opt(z)
 		}
 	}
+	z.tx = transport.NewTransport(z.httpc, z.policy)
 	return z
 }
 
@@ -137,34 +149,29 @@ func (z *zhipuCogVideoX) Submit(ctx context.Context, req Request) (string, error
 		return "", fmt.Errorf("marshal: %w", err)
 	}
 
-	rctx, cancel := context.WithTimeout(ctx, z.timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(rctx, http.MethodPost,
-		z.baseURL+"/videos/generations", bytes.NewReader(payload))
-	if err != nil {
-		return "", err
-	}
-	httpReq.Header.Set("Content-Type", "application/json")
-	httpReq.Header.Set("Authorization", "Bearer "+z.apiKey)
-
-	resp, err := z.httpc.Do(httpReq)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  z.Name(),
+		Action:    "video.submit",
+		Method:    http.MethodPost,
+		URL:       z.baseURL + "/videos/generations",
+		Body:      payload,
+		Client:    z.httpc,
+		Transport: z.tx,
+		Timeout:   z.timeout,
+		// 本 Provider 不向上游透传幂等键，任务创建 POST 一律不重试。
+		Retry: media.SubmitRetryPolicy(""),
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Content-Type", "application/json")
+			r.Header.Set("Authorization", "Bearer "+z.apiKey)
+		},
+	})
 	if err != nil {
 		return "", fmt.Errorf("submit: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-
-	if resp.StatusCode >= 400 {
-		var er zhipuSubmitResp
-		if json.Unmarshal(respBody, &er) == nil && er.Error != nil {
-			return "", fmt.Errorf("zhipu HTTP %d: %s", resp.StatusCode, er.Error.Message)
-		}
-		return "", fmt.Errorf("zhipu HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
 
 	var parsed zhipuSubmitResp
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return "", fmt.Errorf("decode submit response: %w", err)
 	}
 	if parsed.Error != nil {
@@ -180,33 +187,25 @@ func (z *zhipuCogVideoX) Poll(ctx context.Context, taskID string) (TaskStatus, e
 	if z.apiKey == "" {
 		return TaskStatus{}, fmt.Errorf("zhipu-cogvideox: 未配置 API Key")
 	}
-	rctx, cancel := context.WithTimeout(ctx, z.timeout)
-	defer cancel()
-
-	httpReq, err := http.NewRequestWithContext(rctx, http.MethodGet,
-		z.baseURL+"/async-result/"+taskID, nil)
-	if err != nil {
-		return TaskStatus{}, err
-	}
-	httpReq.Header.Set("Authorization", "Bearer "+z.apiKey)
-
-	resp, err := z.httpc.Do(httpReq)
+	resp, err := transport.Do(ctx, transport.Request{
+		Provider:  z.Name(),
+		Action:    "video.poll",
+		Method:    http.MethodGet,
+		URL:       z.baseURL + "/async-result/" + taskID,
+		Client:    z.httpc,
+		Transport: z.tx,
+		Timeout:   z.timeout,
+		SetHeaders: func(r *http.Request) {
+			r.Header.Set("Authorization", "Bearer "+z.apiKey)
+		},
+	})
 	if err != nil {
 		return TaskStatus{}, fmt.Errorf("poll: %w", err)
 	}
 	defer resp.Body.Close()
-	respBody, _ := io.ReadAll(io.LimitReader(resp.Body, 64*1024))
-
-	if resp.StatusCode >= 400 {
-		var er zhipuPollResp
-		if json.Unmarshal(respBody, &er) == nil && er.Error != nil {
-			return TaskStatus{}, fmt.Errorf("zhipu HTTP %d: %s", resp.StatusCode, er.Error.Message)
-		}
-		return TaskStatus{}, fmt.Errorf("zhipu HTTP %d: %s", resp.StatusCode, string(respBody))
-	}
 
 	var parsed zhipuPollResp
-	if err := json.Unmarshal(respBody, &parsed); err != nil {
+	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("decode poll response: %w", err)
 	}
 
