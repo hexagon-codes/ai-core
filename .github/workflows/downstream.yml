@@ -26,7 +26,11 @@ jobs:
       - name: Install sandbox runtime
         run: |
           sudo apt-get update
-          sudo apt-get install -y bubblewrap
+          sudo apt-get install -y bubblewrap uidmap
+          sudo sysctl -w kernel.unprivileged_userns_clone=1 || true
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          bwrap --version
+          unshare --user --map-root-user true
       - name: go.work（下游用本 PR 的 ai-core）
         run: go work init ./toolkit ./ai-core ./hexagon ./hexclaw
       - name: hexagon build + test
