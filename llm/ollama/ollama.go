@@ -28,12 +28,19 @@ const (
 	defaultModelMaxTokens           = 32768
 	ollamaDefaultResponseHeaderWait = 120 * time.Second
 	ollamaStreamResponseHeaderWait  = 10 * time.Minute
+
+	// defaultKeepAlive 每次请求随发的模型驻留时长（BUG-20260710）。
+	// Ollama 服务端默认仅 5 分钟：空闲即卸载模型、KV 前缀缓存全丢——纯 CPU 机器上
+	// 大 system prompt（真机取证 ~7.9k token @ 23 tok/s ≈ 344s）每次都要冷 prefill。
+	// 请求级 keep_alive 每次刷新驻留窗口，让模型与 KV 缓存跨对话间隙存活。
+	defaultKeepAlive = "30m"
 )
 
 // Provider 实现 Ollama LLM 提供者
 type Provider struct {
 	baseURL          string
 	model            string
+	keepAlive        string // 请求级模型驻留时长（空串=不下发，回落 Ollama 服务端默认）
 	httpClient       *http.Client
 	streamHTTPClient *http.Client
 	transport        *transport.Transport
@@ -59,6 +66,13 @@ func WithModel(model string) Option {
 	}
 }
 
+// WithKeepAlive 设置请求级模型驻留时长（如 "30m"/"2h"；BUG-20260710，见 defaultKeepAlive）。
+func WithKeepAlive(d string) Option {
+	return func(p *Provider) {
+		p.keepAlive = d
+	}
+}
+
 // WithHTTPClient 设置 HTTP 客户端
 func WithHTTPClient(client *http.Client) Option {
 	return func(p *Provider) {
@@ -80,8 +94,9 @@ func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
 func New(opts ...Option) *Provider {
 	defaultPolicy := llm.NetworkPolicy{AllowHTTP: true, AllowPrivate: true}
 	p := &Provider{
-		baseURL: defaultBaseURL,
-		model:   defaultModel,
+		baseURL:   defaultBaseURL,
+		model:     defaultModel,
+		keepAlive: defaultKeepAlive,
 		// 不设全局 Timeout — 流式请求的超时由调用方 context 控制
 		// http.Client.Timeout 对流式响应会在整个读取期间生效，
 		// 本地模型推理可能需要数分钟
@@ -371,6 +386,14 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	}
 	if think, ok := ollamaThinkFromMetadata(req.Metadata); ok {
 		payload["think"] = think
+	}
+	// 模型驻留（BUG-20260710）：metadata 按请求覆盖 > 选项/默认；空串=不下发
+	keepAlive := p.keepAlive
+	if v, ok := req.Metadata["keep_alive"].(string); ok && strings.TrimSpace(v) != "" {
+		keepAlive = strings.TrimSpace(v)
+	}
+	if keepAlive != "" {
+		payload["keep_alive"] = keepAlive
 	}
 
 	// Ollama 使用 options 嵌套参数
