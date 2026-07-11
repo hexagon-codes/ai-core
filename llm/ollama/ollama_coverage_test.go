@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -19,6 +20,8 @@ func userReq(content string) llm.CompletionRequest {
 }
 
 func TestNew_EnvAndOptions(t *testing.T) {
+	t.Setenv("OLLAMA_HOST", "")
+	t.Setenv("OLLAMA_MODEL", "")
 	if p := New(); p.baseURL != defaultBaseURL || p.model != defaultModel {
 		t.Fatalf("默认值错误: %+v", p)
 	}
@@ -113,8 +116,10 @@ func TestBuildRequestBody_Options(t *testing.T) {
 		opts["num_predict"].(float64) != 100 || opts["stop"] == nil {
 		t.Errorf("options 错误: %v", opts)
 	}
-	if opts["num_ctx"].(float64) != defaultOllamaNumCtx {
-		t.Errorf("num_ctx 默认值错误: %v", opts)
+	// BUG-20260710 P0 分档:小请求(短 prompt+num_predict 100)自动落最小档 4096,
+	// 不再恒发 32768(恒 32k 实测多驻留 1.03GB 且首推理 3×慢)。
+	if opts["num_ctx"].(float64) != 4096 {
+		t.Errorf("小请求应落 4096 档: %v", opts)
 	}
 	if payload["tools"] == nil {
 		t.Errorf("tools 未写入")
@@ -137,8 +142,9 @@ func TestBuildRequestBody_NumCtxFromMetadataAndModelContext(t *testing.T) {
 		t.Fatal(unmarshalErr)
 	}
 	opts := payload["options"].(map[string]any)
-	if opts["num_ctx"].(float64) != maxAutomaticNumCtx {
-		t.Fatalf("model context should clamp to automatic cap: %v", opts)
+	// 分档新契约:模型 MaxTokens 是上限不是下限——"hi" 这类小请求仍走 4096 档。
+	if opts["num_ctx"].(float64) != 4096 {
+		t.Fatalf("small request should pick smallest tier regardless of model cap: %v", opts)
 	}
 
 	body, err = p.buildRequestBody(llm.CompletionRequest{
@@ -310,8 +316,13 @@ func TestStream_SuccessAndErrors(t *testing.T) {
 
 func TestModels_FetchCacheAndFallback(t *testing.T) {
 	// fetchLocalModels 成功 → 缓存
-	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
-		_, _ = w.Write([]byte(`{"models":[{"name":"qwen2.5:7b","details":{"family":"qwen","parameter_size":"7B"}}]}`))
+	var tagsCalls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path != "/api/tags" {
+			t.Fatalf("unexpected endpoint %s", r.URL.Path)
+		}
+		tagsCalls.Add(1)
+		_, _ = w.Write([]byte(`{"models":[{"name":"qwen2.5:7b","capabilities":["completion"],"details":{"family":"qwen","parameter_size":"7B","context_length":32768}}]}`))
 	}))
 	defer srv.Close()
 	p := New(WithBaseURL(srv.URL))
@@ -322,6 +333,9 @@ func TestModels_FetchCacheAndFallback(t *testing.T) {
 	// 第二次走缓存分支
 	if got := p.Models(); len(got) != 1 {
 		t.Fatalf("缓存分支错误: %+v", got)
+	}
+	if got := tagsCalls.Load(); got != 1 {
+		t.Fatalf("/api/tags calls = %d, want exactly 1 after cache hit", got)
 	}
 	// fallback：上游不可达 → 默认列表
 	fb := New(WithBaseURL("http://127.0.0.1:1")).Models()
@@ -362,7 +376,7 @@ func TestModels_ReadsModelFieldFromTags(t *testing.T) {
 		if r.URL.Path != "/api/tags" {
 			t.Fatalf("unexpected endpoint %s", r.URL.Path)
 		}
-		_, _ = w.Write([]byte(`{"models":[{"model":"qwen3.5:9b","capabilities":["vision"],"details":{"family":"qwen35","parameter_size":"9.7B"}}]}`))
+		_, _ = w.Write([]byte(`{"models":[{"model":"qwen3.5:9b","capabilities":["vision"],"details":{"family":"qwen35","parameter_size":"9.7B","context_length":32768}}]}`))
 	}))
 	defer srv.Close()
 

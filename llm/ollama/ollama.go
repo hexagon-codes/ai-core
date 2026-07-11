@@ -2,19 +2,26 @@
 package ollama
 
 import (
+	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
+	"math"
 	"net/http"
+	"net/http/httptrace"
 	"os"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/llm/openai"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/tokenizer"
 	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
@@ -38,15 +45,26 @@ const (
 
 // Provider 实现 Ollama LLM 提供者
 type Provider struct {
-	baseURL          string
-	model            string
-	keepAlive        string // 请求级模型驻留时长（空串=不下发，回落 Ollama 服务端默认）
-	httpClient       *http.Client
-	streamHTTPClient *http.Client
-	transport        *transport.Transport
-	streamTransport  *transport.Transport
-	policy           *llm.NetworkPolicy
-	models           []llm.ModelInfo // 缓存的模型列表
+	baseURL   string
+	model     string
+	keepAlive string // 请求级模型驻留时长（空串=不下发，回落 Ollama 服务端默认）
+	// numCtx 粘性水位按模型记录成功请求，自动分档只升不降；有界 LRU 防止
+	// 任意模型名耗尽内存。显式 metadata 与失败请求均不进入水位。
+	stickyNumCtxMu    sync.Mutex
+	stickyNumCtx      map[string]int
+	stickyNumCtxOrder []string
+	pendingNumCtx     map[string]map[int]int
+	numCtxWriteOnce   [64]sync.Once
+	numCtxWriteGate   [64]chan struct{}
+	httpClient        *http.Client
+	streamHTTPClient  *http.Client
+	transport         *transport.Transport
+	streamTransport   *transport.Transport
+	policy            *llm.NetworkPolicy
+	// modelsMu 保护 models:Models() 惰性写入与 numCtxForRequest 的读取可能并发
+	// (并发 Complete + Models 曾构成 data race,BUG-20260710 F5)。
+	modelsMu sync.RWMutex
+	models   []llm.ModelInfo // 缓存的模型列表
 }
 
 // Option 是 Provider 的配置选项
@@ -94,9 +112,10 @@ func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
 func New(opts ...Option) *Provider {
 	defaultPolicy := llm.NetworkPolicy{AllowHTTP: true, AllowPrivate: true}
 	p := &Provider{
-		baseURL:   defaultBaseURL,
-		model:     defaultModel,
-		keepAlive: defaultKeepAlive,
+		baseURL:      defaultBaseURL,
+		model:        defaultModel,
+		keepAlive:    defaultKeepAlive,
+		stickyNumCtx: map[string]int{},
 		// 不设全局 Timeout — 流式请求的超时由调用方 context 控制
 		// http.Client.Timeout 对流式响应会在整个读取期间生效，
 		// 本地模型推理可能需要数分钟
@@ -132,22 +151,39 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	if req.Model == "" {
 		req.Model = p.model
 	}
-
-	body, err := p.buildRequestBody(req, false)
+	ctx, releaseWrite, err := p.lockNumCtxWrite(ctx, req.Model)
 	if err != nil {
 		return nil, err
 	}
+	defer releaseWrite()
+
+	body, numCtx, automaticNumCtx, err := p.buildRequestBodyForSend(req, false)
+	if err != nil {
+		return nil, err
+	}
+	var reservation *numCtxReservation
+	if automaticNumCtx {
+		reservation = p.reserveNumCtx(req.Model, numCtx)
+	}
 
 	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/chat", body, false)
+	releaseWrite()
 	if err != nil {
+		reservation.finish(false)
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
 	defer resp.Body.Close()
 
 	var result ollamaResponse
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+		reservation.finish(false)
 		return nil, err
 	}
+	if result.Error != "" {
+		reservation.finish(false)
+		return nil, fmt.Errorf("ollama response error: %s", result.Error)
+	}
+	reservation.finish(true)
 
 	return p.parseResponse(&result, req.Model), nil
 }
@@ -157,32 +193,55 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 	if req.Model == "" {
 		req.Model = p.model
 	}
-
-	body, err := p.buildRequestBody(req, true)
+	ctx, releaseWrite, err := p.lockNumCtxWrite(ctx, req.Model)
 	if err != nil {
 		return nil, err
 	}
+	defer releaseWrite()
 
-	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/chat", body, true)
+	body, numCtx, automaticNumCtx, err := p.buildRequestBodyForSend(req, true)
 	if err != nil {
-		return nil, fmt.Errorf("ollama request failed: %w", err)
+		return nil, err
+	}
+	var reservation *numCtxReservation
+	if automaticNumCtx {
+		reservation = p.reserveNumCtx(req.Model, numCtx)
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(&ollamaStreamParser{}), nil
+	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/chat", body, true)
+	releaseWrite()
+	if err != nil {
+		reservation.finish(false)
+		return nil, fmt.Errorf("ollama request failed: %w", err)
+	}
+	parser := &ollamaStreamParser{}
+	if reservation != nil {
+		reservation.bindContext(ctx)
+		parser.onSuccess = func() { reservation.finish(true) }
+		parser.onFailure = func() { reservation.finish(false) }
+		resp.Body = &numCtxReservationReadCloser{ReadCloser: resp.Body, reservation: reservation}
+	}
+
+	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(parser), nil
 }
 
 // Models 返回可用模型列表
 func (p *Provider) Models() []llm.ModelInfo {
 	// 如果已缓存，直接返回
-	if len(p.models) > 0 {
-		return p.models
+	p.modelsMu.RLock()
+	cached := cloneModelInfos(p.models)
+	p.modelsMu.RUnlock()
+	if len(cached) > 0 {
+		return cached
 	}
 
-	// 尝试从 Ollama 获取本地模型列表
+	// 尝试从 Ollama 获取本地模型列表（网络请求在锁外，避免持锁阻塞）
 	models, err := p.fetchLocalModels()
 	if err == nil && len(models) > 0 {
+		p.modelsMu.Lock()
 		p.models = models
-		return p.models
+		p.modelsMu.Unlock()
+		return cloneModelInfos(models)
 	}
 
 	// 返回常见模型的默认列表
@@ -253,6 +312,15 @@ func (p *Provider) Models() []llm.ModelInfo {
 	}
 }
 
+func cloneModelInfos(models []llm.ModelInfo) []llm.ModelInfo {
+	cloned := make([]llm.ModelInfo, len(models))
+	for i := range models {
+		cloned[i] = models[i]
+		cloned[i].Features = append([]string(nil), models[i].Features...)
+	}
+	return cloned
+}
+
 // fetchLocalModels 从 Ollama 获取本地模型列表
 func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 	resp, err := p.doRequest(context.Background(), http.MethodGet, p.baseURL+"/api/tags", nil, false)
@@ -292,13 +360,18 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 		if modelID == "" {
 			continue
 		}
+		maxTokens := m.Details.ContextLength
 		capabilities := m.Capabilities
-		if len(capabilities) == 0 {
-			if showCaps, err := p.fetchModelCapabilities(context.Background(), modelID); err == nil {
-				capabilities = showCaps
+		if len(capabilities) == 0 || maxTokens <= 0 {
+			if showDetails, err := p.fetchModelDetails(context.Background(), modelID); err == nil {
+				if len(capabilities) == 0 {
+					capabilities = showDetails.capabilities
+				}
+				if maxTokens <= 0 {
+					maxTokens = showDetails.contextLength
+				}
 			}
 		}
-		maxTokens := m.Details.ContextLength
 		if maxTokens <= 0 {
 			maxTokens = defaultModelMaxTokens
 		}
@@ -314,14 +387,19 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 	return models, nil
 }
 
-func (p *Provider) fetchModelCapabilities(ctx context.Context, model string) ([]string, error) {
+type ollamaModelDetails struct {
+	capabilities  []string
+	contextLength int
+}
+
+func (p *Provider) fetchModelDetails(ctx context.Context, model string) (ollamaModelDetails, error) {
 	body, err := json.Marshal(map[string]string{"model": model})
 	if err != nil {
-		return nil, err
+		return ollamaModelDetails{}, err
 	}
 	resp, err := p.doRequest(ctx, http.MethodPost, p.baseURL+"/api/show", body, false)
 	if err != nil {
-		return nil, err
+		return ollamaModelDetails{}, err
 	}
 	defer func() {
 		if closeErr := resp.Body.Close(); closeErr != nil {
@@ -330,12 +408,40 @@ func (p *Provider) fetchModelCapabilities(ctx context.Context, model string) ([]
 	}()
 
 	var result struct {
-		Capabilities []string `json:"capabilities"`
+		Capabilities []string       `json:"capabilities"`
+		ModelInfo    map[string]any `json:"model_info"`
 	}
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
-		return nil, err
+	decoder := json.NewDecoder(resp.Body)
+	decoder.UseNumber()
+	if err := decoder.Decode(&result); err != nil {
+		return ollamaModelDetails{}, err
 	}
-	return result.Capabilities, nil
+	return ollamaModelDetails{
+		capabilities:  result.Capabilities,
+		contextLength: ollamaModelContextLength(result.ModelInfo),
+	}, nil
+}
+
+func ollamaModelContextLength(modelInfo map[string]any) int {
+	if architecture, ok := modelInfo["general.architecture"].(string); ok {
+		if contextLength, ok := positiveInt(modelInfo[strings.TrimSpace(architecture)+".context_length"]); ok {
+			return contextLength
+		}
+	}
+	if contextLength, ok := positiveInt(modelInfo["context_length"]); ok {
+		return contextLength
+	}
+
+	contextLength := 0
+	for key, value := range modelInfo {
+		if !strings.HasSuffix(key, ".context_length") {
+			continue
+		}
+		if candidate, ok := positiveInt(value); ok && (contextLength == 0 || candidate < contextLength) {
+			contextLength = candidate
+		}
+	}
+	return contextLength
 }
 
 func ollamaCapabilitiesToFeatures(capabilities []string) []string {
@@ -374,9 +480,14 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 
 // buildRequestBody 构建请求体
 func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]byte, error) {
+	body, _, _, err := p.buildRequestBodyForSend(req, stream)
+	return body, err
+}
+
+func (p *Provider) buildRequestBodyForSend(req llm.CompletionRequest, stream bool) ([]byte, int, bool, error) {
 	messages, err := convertMessagesForOllama(req.Messages)
 	if err != nil {
-		return nil, err
+		return nil, 0, false, err
 	}
 
 	payload := map[string]any{
@@ -404,13 +515,22 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if req.TopP != nil {
 		options["top_p"] = *req.TopP
 	}
-	if req.MaxTokens > 0 {
-		options["num_predict"] = req.MaxTokens
-	}
+	options["num_predict"] = outputBudget(req)
 	if len(req.Stop) > 0 {
 		options["stop"] = req.Stop
 	}
-	if numCtx := p.numCtxForRequest(req); numCtx > 0 {
+	numCtx, explicitNumCtx := ollamaNumCtxFromMetadata(req.Metadata)
+	if !explicitNumCtx {
+		numCtx = p.numCtxForRequest(req)
+		needed, exceedsAutomaticMaximum := automaticNumCtxNeeded(req)
+		if exceedsAutomaticMaximum {
+			return nil, 0, false, fmt.Errorf("ollama request exceeds automatic num_ctx maximum %d", maxAutomaticNumCtx)
+		}
+		if needed > numCtx {
+			return nil, 0, false, fmt.Errorf("ollama request needs an estimated %d context tokens, automatic num_ctx is %d", needed, numCtx)
+		}
+	}
+	if numCtx > 0 {
 		options["num_ctx"] = numCtx
 	}
 
@@ -432,19 +552,380 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 		}
 	}
 
-	return json.Marshal(payload)
+	body, err := json.Marshal(payload)
+	return body, numCtx, !explicitNumCtx, err
 }
 
 func (p *Provider) numCtxForRequest(req llm.CompletionRequest) int {
+	// 显式 metadata 最高优先且原样生效(可低于自动档),不影响粘性水位——显式即契约。
 	if numCtx, ok := ollamaNumCtxFromMetadata(req.Metadata); ok {
 		return numCtx
 	}
+
+	// BUG-20260710 P0:恒 32768 让 KV/buffer 多预分配 ~1GB 纯脏页且小请求首推理 3×慢
+	// (真机实测 230s vs 74s)。自动档按「prompt 估算 + 输出预算 + 余量」取最小可容纳档。
+	needed, _ := automaticNumCtxNeeded(req)
+	tier := automaticNumCtxTier(needed)
+
+	// 模型自身上下文上限仍是硬顶(8k 模型不发 16k)。
+	capLimit := 0
+	p.modelsMu.RLock()
 	for _, model := range p.models {
-		if model.ID == req.Model || model.Name == req.Model {
-			return clampAutomaticNumCtx(model.MaxTokens)
+		if sameOllamaModel(model.ID, req.Model) || sameOllamaModel(model.Name, req.Model) {
+			capLimit = clampAutomaticNumCtx(model.MaxTokens)
+			break
 		}
 	}
-	return defaultOllamaNumCtx
+	p.modelsMu.RUnlock()
+	if capLimit > 0 && capLimit < tier {
+		tier = capLimit
+	}
+
+	// 同模型已成功请求的粘性水位只升不降；这里只读候选值，只有上游成功后
+	// commitNumCtx 才更新 LRU。硬顶在合并后再钳一次，避免历史水位绕过模型 cap。
+	p.stickyNumCtxMu.Lock()
+	defer p.stickyNumCtxMu.Unlock()
+	key := stickyNumCtxKey(req.Model)
+	if cur := p.stickyNumCtx[key]; cur > tier {
+		tier = cur
+	}
+	if pending := p.pendingNumCtxMaxLocked(key); pending > tier {
+		tier = pending
+	}
+	if capLimit > 0 && tier > capLimit {
+		tier = capLimit
+	}
+	return tier
+}
+
+func (p *Provider) commitNumCtx(model string, numCtx int) {
+	capLimit := p.numCtxCap(model)
+	if capLimit > 0 && numCtx > capLimit {
+		numCtx = capLimit
+	}
+
+	p.stickyNumCtxMu.Lock()
+	defer p.stickyNumCtxMu.Unlock()
+	key := stickyNumCtxKey(model)
+	if cur := p.stickyNumCtx[key]; cur > numCtx {
+		numCtx = cur
+	}
+	if capLimit > 0 && numCtx > capLimit {
+		numCtx = capLimit
+	}
+	p.storeStickyNumCtxLocked(key, numCtx)
+}
+
+func (p *Provider) numCtxCap(model string) int {
+	p.modelsMu.RLock()
+	defer p.modelsMu.RUnlock()
+	for _, modelInfo := range p.models {
+		if sameOllamaModel(modelInfo.ID, model) || sameOllamaModel(modelInfo.Name, model) {
+			return clampAutomaticNumCtx(modelInfo.MaxTokens)
+		}
+	}
+	return 0
+}
+
+type numCtxReservation struct {
+	provider *Provider
+	model    string
+	key      string
+	numCtx   int
+	once     sync.Once
+	stopMu   sync.Mutex
+	finished bool
+	stopCtx  func() bool
+}
+
+func (p *Provider) reserveNumCtx(model string, numCtx int) *numCtxReservation {
+	key := stickyNumCtxKey(model)
+	p.stickyNumCtxMu.Lock()
+	if p.pendingNumCtx == nil {
+		p.pendingNumCtx = make(map[string]map[int]int)
+	}
+	counts := p.pendingNumCtx[key]
+	if counts == nil {
+		counts = make(map[int]int)
+		p.pendingNumCtx[key] = counts
+	}
+	counts[numCtx]++
+	p.stickyNumCtxMu.Unlock()
+	return &numCtxReservation{provider: p, model: model, key: key, numCtx: numCtx}
+}
+
+func (r *numCtxReservation) finish(success bool) {
+	if r == nil {
+		return
+	}
+	r.once.Do(func() {
+		r.stopMu.Lock()
+		r.finished = true
+		stopCtx := r.stopCtx
+		r.stopCtx = nil
+		r.stopMu.Unlock()
+		if stopCtx != nil {
+			stopCtx()
+		}
+		r.provider.finishNumCtxReservation(r, success)
+	})
+}
+
+func (r *numCtxReservation) bindContext(ctx context.Context) {
+	stopCtx := context.AfterFunc(ctx, func() { r.finish(false) })
+	r.stopMu.Lock()
+	if r.finished {
+		r.stopMu.Unlock()
+		stopCtx()
+		return
+	}
+	r.stopCtx = stopCtx
+	r.stopMu.Unlock()
+}
+
+func (p *Provider) finishNumCtxReservation(reservation *numCtxReservation, success bool) {
+	capLimit := p.numCtxCap(reservation.model)
+	p.stickyNumCtxMu.Lock()
+	defer p.stickyNumCtxMu.Unlock()
+
+	if success {
+		numCtx := reservation.numCtx
+		if cur := p.stickyNumCtx[reservation.key]; cur > numCtx {
+			numCtx = cur
+		}
+		if capLimit > 0 && numCtx > capLimit {
+			numCtx = capLimit
+		}
+		p.storeStickyNumCtxLocked(reservation.key, numCtx)
+	}
+
+	counts := p.pendingNumCtx[reservation.key]
+	if counts != nil {
+		counts[reservation.numCtx]--
+		if counts[reservation.numCtx] <= 0 {
+			delete(counts, reservation.numCtx)
+		}
+		if len(counts) == 0 {
+			delete(p.pendingNumCtx, reservation.key)
+		}
+	}
+}
+
+func (p *Provider) pendingNumCtxMaxLocked(key string) int {
+	maxNumCtx := 0
+	for numCtx, count := range p.pendingNumCtx[key] {
+		if count > 0 && numCtx > maxNumCtx {
+			maxNumCtx = numCtx
+		}
+	}
+	return maxNumCtx
+}
+
+func (p *Provider) lockNumCtxWrite(ctx context.Context, model string) (context.Context, func(), error) {
+	if ctx == nil {
+		ctx = context.Background()
+	}
+	digest := sha256.Sum256([]byte(canonicalOllamaModel(model)))
+	index := int(digest[0]) % len(p.numCtxWriteGate)
+	p.numCtxWriteOnce[index].Do(func() {
+		p.numCtxWriteGate[index] = make(chan struct{}, 1)
+		p.numCtxWriteGate[index] <- struct{}{}
+	})
+	gate := p.numCtxWriteGate[index]
+	select {
+	case <-ctx.Done():
+		return ctx, func() {}, ctx.Err()
+	case <-gate:
+	}
+	var once sync.Once
+	release := func() {
+		once.Do(func() { gate <- struct{}{} })
+	}
+	trace := &httptrace.ClientTrace{
+		WroteRequest: func(httptrace.WroteRequestInfo) { release() },
+	}
+	return httptrace.WithClientTrace(ctx, trace), release, nil
+}
+
+type numCtxReservationReadCloser struct {
+	io.ReadCloser
+	reservation *numCtxReservation
+}
+
+func (r *numCtxReservationReadCloser) Read(p []byte) (int, error) {
+	n, err := r.ReadCloser.Read(p)
+	if err != nil && (n == 0 || !bytes.ContainsRune(p[:n], '\n') || len(bytes.TrimSpace(p[:n])) == 0) {
+		r.reservation.finish(false)
+	}
+	return n, err
+}
+
+func (r *numCtxReservationReadCloser) Close() error {
+	r.reservation.finish(false)
+	return r.ReadCloser.Close()
+}
+
+const maxStickyNumCtxModels = 64
+const maxStickyNumCtxKeyBytes = 256
+
+func stickyNumCtxKey(model string) string {
+	model = canonicalOllamaModel(model)
+	if len(model) <= maxStickyNumCtxKeyBytes {
+		return "raw:" + model
+	}
+	return fmt.Sprintf("sha256:%x", sha256.Sum256([]byte(model)))
+}
+
+func canonicalOllamaModel(model string) string {
+	model = strings.TrimSpace(model)
+	if model == "" {
+		return model
+	}
+	digest := ""
+	if index := strings.Index(model, "@"); index >= 0 {
+		digest = model[index:]
+		model = model[:index]
+	}
+	model = strings.TrimPrefix(model, "registry.ollama.ai/")
+	model = strings.TrimPrefix(model, "library/")
+	if digest != "" {
+		return model + digest
+	}
+	lastSlash := strings.LastIndex(model, "/")
+	if strings.LastIndex(model, ":") <= lastSlash {
+		return model + ":latest"
+	}
+	return model
+}
+
+func sameOllamaModel(left, right string) bool {
+	return canonicalOllamaModel(left) == canonicalOllamaModel(right)
+}
+
+func (p *Provider) storeStickyNumCtxLocked(model string, numCtx int) {
+	if p.stickyNumCtx == nil {
+		p.stickyNumCtx = make(map[string]int)
+	}
+	_, exists := p.stickyNumCtx[model]
+	for i, cachedModel := range p.stickyNumCtxOrder {
+		if cachedModel != model {
+			continue
+		}
+		copy(p.stickyNumCtxOrder[i:], p.stickyNumCtxOrder[i+1:])
+		p.stickyNumCtxOrder[len(p.stickyNumCtxOrder)-1] = ""
+		p.stickyNumCtxOrder = p.stickyNumCtxOrder[:len(p.stickyNumCtxOrder)-1]
+		break
+	}
+	if !exists && len(p.stickyNumCtx) >= maxStickyNumCtxModels {
+		delete(p.stickyNumCtx, p.stickyNumCtxOrder[0])
+		copy(p.stickyNumCtxOrder, p.stickyNumCtxOrder[1:])
+		p.stickyNumCtxOrder[len(p.stickyNumCtxOrder)-1] = ""
+		p.stickyNumCtxOrder = p.stickyNumCtxOrder[:len(p.stickyNumCtxOrder)-1]
+	}
+	p.stickyNumCtx[model] = numCtx
+	p.stickyNumCtxOrder = append(p.stickyNumCtxOrder, model)
+}
+
+// numCtxTiers 自动分档表:少档 + 只升不降,平衡「内存/首推理成本」与「重载抖动」。
+var numCtxTiers = []int{4096, 8192, 16384, 32768}
+
+func automaticNumCtxTier(needed int) int {
+	for _, tier := range numCtxTiers {
+		if needed <= tier {
+			return tier
+		}
+	}
+	return numCtxTiers[len(numCtxTiers)-1]
+}
+
+// numCtxHeadroom 覆盖模板与特殊 token 等固定估算开销。
+const numCtxHeadroom = 512
+
+// numCtxImageBudget 按已观测视觉编码上界留出整档余量；base64 长度与
+// vision token 数无关，不能按文本口径估算。
+const numCtxImageBudget = 6144
+
+// numCtxEstimateMarginDenominator 给快速 tokenizer 的 ±10% 误差留 12.5% 余量。
+const numCtxEstimateMarginDenominator = 8
+
+const numCtxToolsPromptOverhead = 64
+const numCtxToolDefinitionOverhead = 16
+const numCtxToolCallOverhead = 8
+
+// estimateRequestTokens 估算请求侧 token:复用 tokenizer 的中英混合口径(L0 复用,不手搓)。
+// tool Parameters(完整 JSON schema 随 payload["tools"] 发给 Ollama)与图片必须计入,
+// 否则档位边界处 num_ctx 偏小,Ollama 会静默截断 prompt(BUG-20260710 F2)。
+func estimateRequestTokens(req llm.CompletionRequest) int {
+	const estimateLimit = maxAutomaticNumCtx + 1
+	var b strings.Builder
+	images := 0
+	framingTokens := 0
+	for _, m := range req.Messages {
+		if len(m.MultiContent) > 0 {
+			for _, part := range m.MultiContent {
+				switch part.Type {
+				case "image_url":
+					if part.ImageURL != nil {
+						images++
+					}
+				default:
+					b.WriteString(part.Text)
+				}
+			}
+		} else {
+			b.WriteString(m.Content)
+		}
+		if len(m.ToolCalls) > 0 {
+			if raw, err := json.Marshal(m.ToolCalls); err == nil {
+				b.Write(raw)
+			}
+			framingTokens = saturatingAdd(framingTokens, len(m.ToolCalls)*numCtxToolCallOverhead, estimateLimit)
+		}
+	}
+	if len(req.Tools) > 0 {
+		if raw, err := json.Marshal(req.Tools); err == nil {
+			b.Write(raw)
+		}
+		framingTokens = saturatingAdd(framingTokens, numCtxToolsPromptOverhead, estimateLimit)
+		framingTokens = saturatingAdd(framingTokens, len(req.Tools)*numCtxToolDefinitionOverhead, estimateLimit)
+	}
+	// 每条消息的模板包装开销粗记 8 token，并给快速 tokenizer 的误差留余量。
+	textTokens := saturatingAdd(tokenizer.CountGPT4(b.String()), len(req.Messages)*8, estimateLimit)
+	textTokens = saturatingAdd(textTokens, framingTokens, estimateLimit)
+	margin := (textTokens + numCtxEstimateMarginDenominator - 1) / numCtxEstimateMarginDenominator
+	estimated := saturatingAdd(textTokens, margin, estimateLimit)
+	imageTokens := estimateLimit
+	if images <= estimateLimit/numCtxImageBudget {
+		imageTokens = images * numCtxImageBudget
+	}
+	return saturatingAdd(estimated, imageTokens, estimateLimit)
+}
+
+func automaticNumCtxNeeded(req llm.CompletionRequest) (int, bool) {
+	const estimateLimit = maxAutomaticNumCtx + 1
+	needed := estimateRequestTokens(req)
+	needed = saturatingAdd(needed, outputBudget(req), estimateLimit)
+	needed = saturatingAdd(needed, numCtxHeadroom, estimateLimit)
+	if needed > maxAutomaticNumCtx {
+		return maxAutomaticNumCtx, true
+	}
+	return needed, false
+}
+
+func saturatingAdd(total, delta, limit int) int {
+	if total >= limit || delta >= limit-total {
+		return limit
+	}
+	return total + delta
+}
+
+// outputBudget 输出预算:显式 MaxTokens 优先,未设时固定为 2048；请求构造会把
+// 同一数值下发为 num_predict，保证估算预算与 Ollama 实际生成上限一致。
+func outputBudget(req llm.CompletionRequest) int {
+	if req.MaxTokens > 0 {
+		return req.MaxTokens
+	}
+	return 2048
 }
 
 func clampAutomaticNumCtx(contextLength int) int {
@@ -476,13 +957,22 @@ func positiveInt(value any) (int, bool) {
 	case int:
 		return v, v > 0
 	case int64:
-		return int(v), v > 0
+		n := int(v)
+		return n, n > 0 && int64(n) == v
 	case int32:
 		return int(v), v > 0
 	case float64:
-		return int(v), v > 0
+		if math.IsNaN(v) || math.IsInf(v, 0) || v <= 0 || v != math.Trunc(v) {
+			return 0, false
+		}
+		n := int(v)
+		return n, n > 0 && float64(n) == v
 	case float32:
-		return int(v), v > 0
+		if v <= 0 || v != float32(math.Trunc(float64(v))) {
+			return 0, false
+		}
+		n := int(v)
+		return n, n > 0 && float32(n) == v
 	case json.Number:
 		n, err := strconv.Atoi(v.String())
 		return n, err == nil && n > 0
@@ -699,15 +1189,28 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 	return result
 }
 
-type ollamaStreamParser struct{}
+type ollamaStreamParser struct {
+	onSuccess   func()
+	onFailure   func()
+	successOnce sync.Once
+}
 
 func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 	var resp ollamaResponse
 	if err := json.Unmarshal(data, &resp); err != nil {
+		if p.onFailure != nil {
+			p.onFailure()
+		}
 		return nil, err
 	}
 	if resp.Error != "" {
+		if p.onFailure != nil {
+			p.onFailure()
+		}
 		return nil, fmt.Errorf("ollama stream error: %s", resp.Error)
+	}
+	if p.onSuccess != nil {
+		p.successOnce.Do(p.onSuccess)
 	}
 
 	chunk := &streamx.Chunk{
@@ -785,6 +1288,28 @@ func (p *Provider) doRequest(ctx context.Context, method, url string, body []byt
 		client = p.streamHTTPClient
 		requestTransport = p.streamTransport
 	}
+	isChat := strings.HasSuffix(url, "/api/chat")
+	if isChat {
+		if requestTransport != nil {
+			if err := transport.ValidateURL(ctx, url, requestTransport.Policy()); err != nil {
+				return nil, err
+			}
+			guardedClient, err := requestTransport.Client()
+			if err != nil {
+				return nil, err
+			}
+			client = guardedClient
+			requestTransport = nil
+		}
+		if client == nil {
+			client = http.DefaultClient
+		}
+		noRedirectClient := *client
+		noRedirectClient.CheckRedirect = func(*http.Request, []*http.Request) error {
+			return http.ErrUseLastResponse
+		}
+		client = &noRedirectClient
+	}
 	cfg := transport.Request{
 		Provider:  p.Name(),
 		Action:    strings.TrimPrefix(strings.TrimPrefix(url, strings.TrimRight(p.baseURL, "/")), "/"),
@@ -793,6 +1318,11 @@ func (p *Provider) doRequest(ctx context.Context, method, url string, body []byt
 		Body:      body,
 		Client:    client,
 		Transport: requestTransport,
+	}
+	// /api/chat POST 不是幂等操作；transport 层重试会重复生成，并可能让旧
+	// num_ctx 请求在新水位之后再次写出。失败交由调用方用新请求显式重试。
+	if isChat {
+		cfg.Retry = transport.RetryPolicy{MaxAttempts: 1}
 	}
 	if body != nil {
 		cfg.SetHeaders = func(r *http.Request) {
