@@ -484,7 +484,7 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	return body, err
 }
 
-func (p *Provider) buildRequestBodyForSend(req llm.CompletionRequest, stream bool) ([]byte, int, bool, error) {
+func (p *Provider) buildRequestBodyForSend(req llm.CompletionRequest, stream bool) (body []byte, numCtx int, automaticNumCtx bool, err error) {
 	messages, err := convertMessagesForOllama(req.Messages)
 	if err != nil {
 		return nil, 0, false, err
@@ -552,7 +552,7 @@ func (p *Provider) buildRequestBodyForSend(req llm.CompletionRequest, stream boo
 		}
 	}
 
-	body, err := json.Marshal(payload)
+	body, err = json.Marshal(payload)
 	return body, numCtx, !explicitNumCtx, err
 }
 
