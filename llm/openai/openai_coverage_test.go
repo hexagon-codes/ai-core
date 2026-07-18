@@ -221,6 +221,77 @@ func TestBuildRequestBody_DefaultOpenAIDoesNotSendEnableThinking(t *testing.T) {
 	}
 }
 
+func TestBuildRequestBody_OpenAIReasoningModelMapsThinkingModeToReasoningEffort(t *testing.T) {
+	tests := []struct {
+		name     string
+		metadata map[string]any
+		want     string
+	}{
+		{
+			name:     "thinking on uses high effort",
+			metadata: map[string]any{"thinking": "on"},
+			want:     "high",
+		},
+		{
+			name:     "thinking off disables reasoning when model supports none",
+			metadata: map[string]any{"thinking": "off"},
+			want:     "none",
+		},
+		{
+			name:     "explicit effort takes precedence",
+			metadata: map[string]any{"thinking": "off", "reasoning_effort": "max"},
+			want:     "max",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// A loopback OpenAI-compatible gateway is a valid deployment and must
+			// not silently lose the standard reasoning_effort parameter.
+			p := New("k", WithBaseURL("http://localhost:18080/v1"))
+			body, err := p.buildRequestBody(llm.CompletionRequest{
+				Model:    "gpt-5.6-sol",
+				Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+				Metadata: tt.metadata,
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if got := payload["reasoning_effort"]; got != tt.want {
+				t.Fatalf("reasoning_effort = %#v, want %q; payload=%v", got, tt.want, payload)
+			}
+			if _, ok := payload["enable_thinking"]; ok {
+				t.Fatalf("OpenAI reasoning model must use reasoning_effort, not vendor enable_thinking: %v", payload)
+			}
+		})
+	}
+}
+
+func TestBuildRequestBody_NonReasoningOpenAIModelDoesNotInferReasoningEffort(t *testing.T) {
+	p := New("k", WithBaseURL("http://localhost:18080/v1"))
+	body, err := p.buildRequestBody(llm.CompletionRequest{
+		Model:    "gpt-4o",
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata: map[string]any{"thinking": "on"},
+	}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var payload map[string]any
+	if err := json.Unmarshal(body, &payload); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := payload["reasoning_effort"]; ok {
+		t.Fatalf("non-reasoning model must not receive inferred reasoning_effort: %v", payload)
+	}
+}
+
 func TestBuildRequestBody_ResponseFormatJSONSchema(t *testing.T) {
 	p := New("k")
 	body, _ := p.buildRequestBody(llm.CompletionRequest{

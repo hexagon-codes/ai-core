@@ -380,7 +380,14 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if req.User != "" {
 		payload["user"] = req.User
 	}
-	if thinking, ok := openAIEnableThinkingFromMetadata(req.Metadata); ok && supportsEnableThinking(p.baseURL) {
+	if effort, ok := openAIReasoningEffortFromMetadata(req.Metadata, req.Model); ok {
+		// OpenAI reasoning models use reasoning_effort. This is a request
+		// capability, not a host-name capability: OpenAI-compatible gateways
+		// are commonly deployed on loopback/private URLs and must not silently
+		// lose the parameter merely because their domain is unknown.
+		payload["reasoning_effort"] = effort
+	} else if thinking, ok := openAIEnableThinkingFromMetadata(req.Metadata); ok && supportsEnableThinking(p.baseURL) {
+		// Qwen-compatible vendors use the separate enable_thinking dialect.
 		payload["enable_thinking"] = thinking
 	}
 
@@ -432,6 +439,106 @@ func openAIEnableThinkingFromMetadata(metadata map[string]any) (bool, bool) {
 		}
 	}
 	return false, false
+}
+
+func openAIReasoningEffortFromMetadata(metadata map[string]any, model string) (string, bool) {
+	if len(metadata) == 0 {
+		return "", false
+	}
+
+	// An explicit standard parameter always wins over the coarse on/off UI
+	// switch. Passing it through also supports compatible providers whose
+	// model names are not known to this package.
+	for _, key := range []string{"reasoning_effort", "reasoningEffort"} {
+		raw, exists := metadata[key]
+		if !exists {
+			continue
+		}
+		effort, ok := normalizeOpenAIReasoningEffort(raw)
+		return effort, ok
+	}
+
+	if !supportsOpenAIReasoningEffort(model) {
+		return "", false
+	}
+	enabled, exists := openAIEnableThinkingFromMetadata(metadata)
+	if !exists {
+		return "", false
+	}
+	if enabled {
+		return "high", true
+	}
+	return minimumOpenAIReasoningEffort(model), true
+}
+
+func normalizeOpenAIReasoningEffort(raw any) (string, bool) {
+	value, ok := raw.(string)
+	if !ok {
+		return "", false
+	}
+	value = strings.ToLower(strings.TrimSpace(value))
+	switch value {
+	case "x-high", "x_high":
+		value = "xhigh"
+	}
+	switch value {
+	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+		return value, true
+	default:
+		return "", false
+	}
+}
+
+func supportsOpenAIReasoningEffort(model string) bool {
+	model = canonicalOpenAIModelID(model)
+	if strings.HasPrefix(model, "gpt-5") {
+		return true
+	}
+	for _, prefix := range []string{"o1", "o3", "o4"} {
+		if model == prefix || strings.HasPrefix(model, prefix+"-") {
+			return true
+		}
+	}
+	return strings.HasPrefix(model, "codex-")
+}
+
+func minimumOpenAIReasoningEffort(model string) string {
+	model = canonicalOpenAIModelID(model)
+	if minor, ok := gpt5MinorVersion(model); ok && minor >= 1 {
+		return "none"
+	}
+	if strings.HasPrefix(model, "gpt-5") {
+		// Original GPT-5 supports minimal but not none.
+		return "minimal"
+	}
+	// Older o-series/Codex reasoning models cannot fully disable reasoning.
+	return "low"
+}
+
+func canonicalOpenAIModelID(model string) string {
+	model = strings.ToLower(strings.TrimSpace(model))
+	if slash := strings.LastIndex(model, "/"); slash >= 0 {
+		model = model[slash+1:]
+	}
+	return model
+}
+
+func gpt5MinorVersion(model string) (int, bool) {
+	const prefix = "gpt-5."
+	if !strings.HasPrefix(model, prefix) {
+		return 0, false
+	}
+	rest := model[len(prefix):]
+	minor := 0
+	digits := 0
+	for _, r := range rest {
+		if r < '0' || r > '9' {
+			break
+		}
+		minor = minor*10 + int(r-'0')
+		digits++
+	}
+	return minor, digits > 0
 }
 
 func supportsEnableThinking(baseURL string) bool {
