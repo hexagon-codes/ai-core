@@ -24,12 +24,16 @@ type Schema struct {
 	// 默认空（不输出），可设为 Draft2020_12。多用于独立文档/结构化输出，
 	// 工具参数一般不应设置（见 Draft2020_12 说明）。
 	Dialect     string             `json:"$schema,omitempty"`
-	Type        string             `json:"type"`
+	Type        string             `json:"type,omitempty"`
 	Title       string             `json:"title,omitempty"`
 	Description string             `json:"description,omitempty"`
 	Properties  map[string]*Schema `json:"properties,omitempty"`
 	Required    []string           `json:"required,omitempty"`
 	Items       *Schema            `json:"items,omitempty"`
+	AnyOf       []*Schema          `json:"anyOf,omitempty"`
+	OneOf       []*Schema          `json:"oneOf,omitempty"`
+	AllOf       []*Schema          `json:"allOf,omitempty"`
+	Not         *Schema            `json:"not,omitempty"`
 	// AdditionalProperties 控制对象是否允许声明之外的属性。
 	// 可为 *Schema（约束额外属性的结构）或 bool（false=封闭对象）。
 	// JSON Schema 2020-12 与 OpenAI strict function calling 用 false 表示
