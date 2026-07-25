@@ -132,6 +132,9 @@ func Do(ctx context.Context, cfg Request) (*http.Response, error) {
 		expectedCode = http.StatusOK
 	}
 	retryPolicy := normalizeRetryPolicy(cfg.Retry)
+	if OperationSafetyFromContext(ctx) == OperationSafetyNonIdempotent {
+		retryPolicy.MaxAttempts = 1
+	}
 
 	for attempt := 1; ; attempt++ {
 		httpReq, blockedHeaders, err := newHTTPRequest(ctx, cfg, method)

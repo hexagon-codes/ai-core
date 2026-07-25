@@ -131,6 +131,9 @@ func (p *retryProvider) retryOpts() []retry.Option {
 }
 
 func (p *retryProvider) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
+	if OperationSafetyFromContext(ctx) == OperationSafetyNonIdempotent {
+		return p.inner.Complete(ctx, req)
+	}
 	var resp *CompletionResponse
 	err := retry.DoWithContext(ctx, func() error {
 		var e error
@@ -141,6 +144,9 @@ func (p *retryProvider) Complete(ctx context.Context, req CompletionRequest) (*C
 }
 
 func (p *retryProvider) Stream(ctx context.Context, req CompletionRequest) (*streamx.Stream, error) {
+	if OperationSafetyFromContext(ctx) == OperationSafetyNonIdempotent {
+		return p.inner.Stream(ctx, req)
+	}
 	var stream *streamx.Stream
 	err := retry.DoWithContext(ctx, func() error {
 		var e error

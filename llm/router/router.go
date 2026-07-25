@@ -180,6 +180,9 @@ func (r *Router) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.
 	r.recordLatency(r.getProviderName(provider), time.Since(start))
 
 	if err != nil {
+		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent {
+			return nil, err
+		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
 			fbStart := time.Now()
@@ -202,6 +205,9 @@ func (r *Router) Stream(ctx context.Context, req llm.CompletionRequest) (*stream
 
 	stream, err := provider.Stream(ctx, req)
 	if err != nil {
+		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent {
+			return nil, err
+		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
 			return fallbackProvider.Stream(ctx, req)
@@ -679,6 +685,9 @@ func (e *MultiProviderError) Error() string {
 // 收集各次尝试的错误，全部失败后返回 MultiProviderError。
 func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionRequest, maxRetries int) (*llm.CompletionResponse, error) {
 	if maxRetries < 1 {
+		maxRetries = 1
+	}
+	if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent {
 		maxRetries = 1
 	}
 

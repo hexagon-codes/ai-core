@@ -732,6 +732,32 @@ func TestComplete_RetriesUnexpectedEOFAfterHTTP200(t *testing.T) {
 	}
 }
 
+func TestComplete_NonIdempotentUnexpectedEOFDoesNotReplay(t *testing.T) {
+	var calls atomic.Int32
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			t.Fatalf("method = %s, want POST", r.Method)
+		}
+		calls.Add(1)
+		_, _ = w.Write([]byte(`{"choices":[`))
+	}))
+	defer srv.Close()
+	ctx := llm.WithOperationSafety(context.Background(), llm.OperationSafetyNonIdempotent)
+
+	_, err := New("k", WithBaseURL(srv.URL)).Complete(ctx, llm.CompletionRequest{
+		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+	})
+	if err == nil {
+		t.Fatal("截断响应应原样返回解析错误")
+	}
+	if !errors.Is(err, io.ErrUnexpectedEOF) {
+		t.Fatalf("error = %v, want unexpected EOF", err)
+	}
+	if calls.Load() != 1 {
+		t.Fatalf("physical POST attempts = %d, want 1", calls.Load())
+	}
+}
+
 func TestComplete_RequestBuildAndDoErrors(t *testing.T) {
 	req := llm.CompletionRequest{Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}}}
 

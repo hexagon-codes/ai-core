@@ -279,6 +279,9 @@ func (e *responseDecodeError) Unwrap() error {
 func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path string, body []byte) (T, error) {
 	var zero T
 	policy := transport.DefaultRetryPolicy()
+	if transport.OperationSafetyFromContext(ctx) == transport.OperationSafetyNonIdempotent {
+		policy.MaxAttempts = 1
+	}
 	for attempt := 1; ; attempt++ {
 		resp, err := p.doRequest(ctx, action, path, body)
 		if err != nil {
