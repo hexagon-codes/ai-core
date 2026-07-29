@@ -1190,9 +1190,10 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 }
 
 type ollamaStreamParser struct {
-	onSuccess   func()
-	onFailure   func()
-	successOnce sync.Once
+	onSuccess        func()
+	onFailure        func()
+	successOnce      sync.Once
+	reasoningEvidence streamx.ReasoningDisclosureEvidence
 }
 
 func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
@@ -1220,6 +1221,13 @@ func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 		Content:   resp.Message.Content,
 		Reasoning: resp.Message.Thinking,
 		Raw:       data,
+	}
+	if resp.Message.Thinking != "" {
+		chunk.ReasoningDisclosure = streamx.NewReasoningDisclosure(
+			"ollama",
+			"message.thinking",
+			p.reasoningEvidence,
+		)
 	}
 	if resp.Done {
 		chunk.FinishReason = resp.DoneReason

@@ -41,6 +41,64 @@ const (
 	CustomFormat
 )
 
+// ReasoningVisibility controls whether a reasoning payload is authorized for
+// presentation. Absence and unknown values must be treated as not_exposed.
+type ReasoningVisibility string
+
+const (
+	ReasoningVisible    ReasoningVisibility = "visible"
+	ReasoningNotExposed ReasoningVisibility = "not_exposed"
+)
+
+// ReasoningDisclosure records the trusted provenance used to decide whether a
+// provider reasoning payload may be presented. It does not contain reasoning
+// text or any other provider payload.
+type ReasoningDisclosure struct {
+	Visibility ReasoningVisibility `json:"visibility"`
+	Source     string              `json:"source"`
+	Dialect    string              `json:"dialect"`
+	Provider   string              `json:"provider"`
+	Model      string              `json:"model"`
+}
+
+// ReasoningDisclosureEvidence is supplied by a trusted provider adapter from
+// its frozen route. Wire response fields must never populate this evidence.
+type ReasoningDisclosureEvidence struct {
+	ExplicitlyPublic bool
+	Provider         string
+	Model            string
+}
+
+// NewReasoningDisclosure normalizes adapter evidence fail-closed. Only known
+// source/dialect pairs with complete frozen-route evidence may become visible.
+func NewReasoningDisclosure(source, dialect string, evidence ReasoningDisclosureEvidence) *ReasoningDisclosure {
+	disclosure := &ReasoningDisclosure{
+		Visibility: ReasoningNotExposed,
+		Source:     source,
+		Dialect:    dialect,
+		Provider:   evidence.Provider,
+		Model:      evidence.Model,
+	}
+	if evidence.ExplicitlyPublic &&
+		evidence.Provider != "" &&
+		evidence.Model != "" &&
+		isKnownReasoningDialect(source, dialect) {
+		disclosure.Visibility = ReasoningVisible
+	}
+	return disclosure
+}
+
+func isKnownReasoningDialect(source, dialect string) bool {
+	switch source {
+	case "openai_compatible":
+		return dialect == "delta.reasoning" || dialect == "delta.reasoning_content"
+	case "ollama":
+		return dialect == "message.thinking"
+	default:
+		return false
+	}
+}
+
 // Chunk 表示流式响应中的单个数据块
 // 每次从流中读取数据时，会解析为一个 Chunk 对象
 // 多个 Chunk 的 Content 拼接后形成完整的响应内容
@@ -53,6 +111,9 @@ type Chunk struct {
 	// Reasoning 推理/思考过程的增量内容
 	// 支持 OpenAI o1/o3、DeepSeek-R1、Qwen3 等模型的 reasoning_content/reasoning 字段
 	Reasoning string `json:"reasoning,omitempty"`
+	// ReasoningDisclosure records typed provenance and fail-closed visibility.
+	// A nil value is a legacy/absent disclosure and must be read as not_exposed.
+	ReasoningDisclosure *ReasoningDisclosure `json:"reasoning_disclosure,omitempty"`
 	// Role 消息角色，通常为 "assistant"
 	// 一般只在首个块中包含此字段
 	Role string `json:"role,omitempty"`

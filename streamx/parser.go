@@ -11,7 +11,11 @@ import (
 // OpenAI 使用 Server-Sent Events (SSE) 格式，每行以 "data: " 开头
 // 数据为 JSON 格式，结构遵循 Chat Completions API 规范
 // 流结束标记为 "data: [DONE]"
-type OpenAIParser struct{}
+type OpenAIParser struct {
+	// ReasoningEvidence must come from the trusted, frozen provider route.
+	// Its zero value preserves legacy parsing and fails closed.
+	ReasoningEvidence ReasoningDisclosureEvidence
+}
 
 // openAIChunk 是 OpenAI 流式响应的 JSON 结构
 // 对应 Chat Completions API 的 chunk 格式
@@ -70,8 +74,18 @@ func (p *OpenAIParser) Parse(data []byte) (*Chunk, error) {
 		// 提取推理内容（Qwen3 用 reasoning，DeepSeek/OpenAI 用 reasoning_content）
 		if choice.Delta.Reasoning != "" {
 			chunk.Reasoning = choice.Delta.Reasoning
+			chunk.ReasoningDisclosure = NewReasoningDisclosure(
+				"openai_compatible",
+				"delta.reasoning",
+				p.ReasoningEvidence,
+			)
 		} else if choice.Delta.ReasoningContent != "" {
 			chunk.Reasoning = choice.Delta.ReasoningContent
+			chunk.ReasoningDisclosure = NewReasoningDisclosure(
+				"openai_compatible",
+				"delta.reasoning_content",
+				p.ReasoningEvidence,
+			)
 		}
 
 		// 处理工具调用
