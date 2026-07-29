@@ -4,6 +4,9 @@
 
 ## [Unreleased]
 ### Added
+- `schema`：`Schema` 新增 `anyOf`、`oneOf`、`allOf`、`not` 组合关键字；仅由组合关键字构成的 Schema 会省略空 `type`，并在 JSON 序列化时保留各分支约束。
+- `llm` / `transport`：新增操作级自动重放契约 `OperationSafety` / `WithOperationSafety`；标记为 `OperationSafetyNonIdempotent` 时，LLM 重试中间件、OpenAI 响应解码重试、Router 重试与 fallback、共享 HTTP transport 均不自动重放，未标记请求保持既有重试策略。
+- `streamx`：`Chunk` 新增 `ReasoningDisclosure`，并提供 `ReasoningDisclosureEvidence` 可信来源契约；OpenAI-compatible 与 Ollama 的推理数据块会附带已知来源和方言，只有明确公开且 Provider / Model 证据完整的冻结路由可标记为 `visible`，缺失证据或未知方言失败关闭为 `not_exposed`。
 - `catalog`：新增 Provider / Model 能力矩阵注册表，统一描述 `Modality`、`Feature`、上下文窗口、异步能力、官方 API 标记、来源和成本信息；Provider 可实现 `catalog.Provider` 暴露 `Capabilities()`，上层可通过 `Registry` + `Query` 做模型选择、运营展示和 conformance 校验。
 - `transport`：新增共享上游 HTTP 传输层，提供结构化 `ProviderError`、错误体限长与请求预览、RequestID / Retry-After 提取、安全 Header 合并、请求超时、流式 idle timeout、瞬时错误重试和 SSRF/network policy。`llm.ProviderError`、`llm.NetworkPolicy`、`llm.ErrNetworkPolicy` 作为别名保留兼容。
 - `llm/compatible`：新增 OpenAI-compatible 通用 Provider，支持 `Complete` / `Stream` / `Embed` / `Models` / `Capabilities`；内置 OpenRouter、Groq、Together、Perplexity、xAI、Mistral、Fireworks、DeepInfra、SiliconFlow、Moonshot、Baichuan、StepFun、ModelArk、Doubao 国内外 profile。
@@ -12,6 +15,7 @@
 - `media/voice`：新增 ElevenLabs TTS Provider。
 
 ### Changed
+- `llm/openai`：OpenAI 推理模型把 `thinking` 元数据映射为标准 `reasoning_effort`（`on` → `high`，`off` → 模型支持的最低强度；GPT-5.1+ 为 `none`、GPT-5 为 `minimal`、o1/o3/o4 与 `codex-*` 为 `low`）；显式 `reasoning_effort` 优先，非推理模型不做推断，私有或 loopback compatible 网关也不会丢失该参数，并继续与厂商方言 `enable_thinking` 隔离。
 - 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
 - `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
 - `llm` 缓存默认 key 改为完整请求的稳定 JSON hash，覆盖 `MultiContent`、`Metadata`、tools、response format 等会影响上游语义的字段；不可序列化请求会跳过缓存读写，避免伪 key 漂移和缓存堆积。
