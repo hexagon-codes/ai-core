@@ -126,6 +126,21 @@ func Do(ctx context.Context, cfg Request) (*http.Response, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	beforeSendHook := beforeSendHookForAction(ctx, cfg.Action)
+	if beforeSendHook != nil {
+		// http.Client follows 307/308 with the original method and GetBody,
+		// which could turn one durable authorization hook into multiple
+		// physical POSTs. Use a shallow client copy and expose the first redirect
+		// response to the normal status classifier instead.
+		hookClient := *client
+		hookClient.CheckRedirect = func(
+			_ *http.Request,
+			_ []*http.Request,
+		) error {
+			return http.ErrUseLastResponse
+		}
+		client = &hookClient
+	}
 
 	expectedCode := cfg.ExpectedCode
 	if expectedCode == 0 {
@@ -141,6 +156,30 @@ func Do(ctx context.Context, cfg Request) (*http.Response, error) {
 		if err != nil {
 			cancelRequest()
 			return nil, requestError(cfg, bodyPreview, bodyPreviewTruncated, blockedHeaders, 0, err)
+		}
+		if err := ctx.Err(); err != nil {
+			cancelRequest()
+			return nil, requestError(
+				cfg,
+				bodyPreview,
+				bodyPreviewTruncated,
+				blockedHeaders,
+				0,
+				err,
+			)
+		}
+		if beforeSendHook != nil {
+			if err := beforeSendHook(ctx); err != nil {
+				cancelRequest()
+				return nil, requestError(
+					cfg,
+					bodyPreview,
+					bodyPreviewTruncated,
+					blockedHeaders,
+					0,
+					err,
+				)
+			}
 		}
 
 		startedAt := time.Now()

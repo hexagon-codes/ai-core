@@ -15,10 +15,11 @@
 - `media/voice`：新增 ElevenLabs TTS Provider。
 
 ### Changed
-- `llm/openai`：OpenAI 推理模型把 `thinking` 元数据映射为标准 `reasoning_effort`（`on` → `high`，`off` → 模型支持的最低强度；GPT-5.1+ 为 `none`、GPT-5 为 `minimal`、o1/o3/o4 与 `codex-*` 为 `low`）；显式 `reasoning_effort` 优先，非推理模型不做推断，私有或 loopback compatible 网关也不会丢失该参数，并继续与厂商方言 `enable_thinking` 隔离。
+- `llm/openai`：仅当请求以 `ReasoningPolicyScopeStructuredVisionRecognition` 显式声明结构化视觉识别作用域时，OpenAI 推理模型才会把 `thinking` 元数据推断为标准 `reasoning_effort`（`on` → `high`，`off` → 模型支持的最低强度；GPT-5.1+ 为 `none`、GPT-5 为 `minimal`、o1/o3/o4 与 `codex-*` 为 `low`）；零值作用域保持既有 wire 不变，显式 `reasoning_effort` 仍独立透传且优先，非推理模型不做推断，私有或 loopback compatible 网关也不会丢失该参数，并继续与厂商方言 `enable_thinking` 隔离。
 - 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
 - `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
-- `llm` 缓存默认 key 改为完整请求的稳定 JSON hash，覆盖 `MultiContent`、`Metadata`、tools、response format 等会影响上游语义的字段；不可序列化请求会跳过缓存读写，避免伪 key 漂移和缓存堆积。
+- `llm` 缓存默认 key 改为完整请求及控制平面策略作用域的稳定 JSON hash，覆盖 `MultiContent`、`Metadata`、`ReasoningPolicyScope`、tools、response format 等会影响上游语义的字段；不可序列化请求会跳过缓存读写，避免跨策略复用、伪 key 漂移和缓存堆积。
+- `transport`：新增仅由调用方 context 绑定、可按 action 限定的 `BeforeSendHook`，在全部本地前置检查通过后、紧邻 `http.Client.Do` 前执行；hook 失败保持零请求，hook-bound 请求不自动跟随 307/308 保留方法重定向，且 `llm` 缓存会绕过命中以保证真实物理发送边界可观察。
 - `llm/ollama`：适配新版 Ollama 元数据与媒体能力，`/api/tags` 读取 `model`、`capabilities`、`context_length`，缺失能力时回退 `/api/show`；OpenAI 多模态 `image_url` 会转换为 Ollama `images` base64 数组；请求默认写入 `num_ctx`，并支持通过 metadata 覆盖。
 - `streamx`：`CustomFormat` 支持原始 JSON Lines 流，兼容 Ollama 等非 SSE 上游，同时保留 `data:` SSE 解析路径。
 - `media` 统一任务状态归一化，新增 `TaskCancelled`，`TaskState.Terminal()` 覆盖成功、失败和取消。

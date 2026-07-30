@@ -383,7 +383,11 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if req.User != "" {
 		payload["user"] = req.User
 	}
-	if effort, ok := openAIReasoningEffortFromMetadata(req.Metadata, req.Model); ok {
+	if effort, ok := openAIReasoningEffortFromMetadata(
+		req.Metadata,
+		req.Model,
+		req.ReasoningPolicyScope,
+	); ok {
 		// OpenAI reasoning models use reasoning_effort. This is a request
 		// capability, not a host-name capability: OpenAI-compatible gateways
 		// are commonly deployed on loopback/private URLs and must not silently
@@ -444,7 +448,11 @@ func openAIEnableThinkingFromMetadata(metadata map[string]any) (bool, bool) {
 	return false, false
 }
 
-func openAIReasoningEffortFromMetadata(metadata map[string]any, model string) (string, bool) {
+func openAIReasoningEffortFromMetadata(
+	metadata map[string]any,
+	model string,
+	scope llm.ReasoningPolicyScope,
+) (string, bool) {
 	if len(metadata) == 0 {
 		return "", false
 	}
@@ -461,6 +469,9 @@ func openAIReasoningEffortFromMetadata(metadata map[string]any, model string) (s
 		return effort, ok
 	}
 
+	if scope != llm.ReasoningPolicyScopeStructuredVisionRecognition {
+		return "", false
+	}
 	if !supportsOpenAIReasoningEffort(model) {
 		return "", false
 	}

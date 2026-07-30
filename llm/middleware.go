@@ -428,6 +428,13 @@ func (p *cacheProvider) CountTokens(messages []Message) (int, error) {
 }
 
 func (p *cacheProvider) Complete(ctx context.Context, req CompletionRequest) (*CompletionResponse, error) {
+	if hasBeforeSendHook(ctx) {
+		// A durable physical-call owner must observe the actual shared
+		// transport boundary. Serving a semantic cache hit would skip its
+		// before-send CAS and make a cached result indistinguishable from a
+		// provider POST.
+		return p.inner.Complete(ctx, req)
+	}
 	// 生成缓存键；空键表示请求不可缓存（如序列化失败），整体跳过缓存读写
 	var key string
 	if p.keyFn != nil {
@@ -477,11 +484,23 @@ func (p *cacheProvider) Stream(ctx context.Context, req CompletionRequest) (*str
 
 // defaultCacheKey 默认的缓存键生成
 //
-// 使用完整请求的稳定 JSON 表示，避免遗漏 MultiContent、Metadata 等会影响上游语义的字段。
+// 使用完整请求及控制平面策略作用域的稳定 JSON 表示，避免遗漏
+// MultiContent、Metadata、ReasoningPolicyScope 等会影响上游语义的字段。
 // 序列化失败时返回空串标记请求不可缓存：不能落回 %#v 伪键，
 // 其中的指针地址会让同一请求每次生成不同键，缓存永不命中且条目堆积。
 func defaultCacheKey(req *CompletionRequest) string {
-	data, err := json.Marshal(req)
+	var scope ReasoningPolicyScope
+	if req != nil {
+		scope = req.ReasoningPolicyScope
+	}
+	cacheIdentity := struct {
+		*CompletionRequest
+		ReasoningPolicyScope ReasoningPolicyScope `json:"reasoning_policy_scope,omitempty"`
+	}{
+		CompletionRequest:    req,
+		ReasoningPolicyScope: scope,
+	}
+	data, err := json.Marshal(cacheIdentity)
 	if err != nil {
 		return ""
 	}

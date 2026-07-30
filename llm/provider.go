@@ -110,6 +110,18 @@ func NewToolDefinition(name, description string, parameters *Schema) ToolDefinit
 	}
 }
 
+// ReasoningPolicyScope is an explicit, typed opt-in for adapter inference from
+// coarse semantic reasoning metadata. The zero value disables inference.
+type ReasoningPolicyScope string
+
+const (
+	// ReasoningPolicyScopeStructuredVisionRecognition allows a Provider adapter
+	// to translate the semantic thinking mode for a structured vision
+	// recognition request. It is control-plane state and is never serialized
+	// directly into an upstream payload.
+	ReasoningPolicyScopeStructuredVisionRecognition ReasoningPolicyScope = "structured_vision_recognition"
+)
+
 // CompletionRequest 表示补全请求
 type CompletionRequest struct {
 	// Model 模型名称（如 "gpt-4o"、"deepseek-chat"）
@@ -142,6 +154,11 @@ type CompletionRequest struct {
 
 	// Metadata 额外元数据
 	Metadata map[string]any `json:"metadata,omitempty"`
+
+	// ReasoningPolicyScope explicitly opts this request into adapter inference
+	// from coarse reasoning metadata such as thinking=off. Direct standard
+	// parameters such as reasoning_effort remain independent of this scope.
+	ReasoningPolicyScope ReasoningPolicyScope `json:"-"`
 
 	// ResponseFormat 响应格式约束
 	//

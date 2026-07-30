@@ -205,9 +205,10 @@ func TestBuildRequestBody_SiliconFlowEnableThinkingFromMetadata(t *testing.T) {
 func TestBuildRequestBody_DefaultOpenAIDoesNotSendEnableThinking(t *testing.T) {
 	p := New("k")
 	body, err := p.buildRequestBody(llm.CompletionRequest{
-		Model:    "gpt-4o",
-		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
-		Metadata: map[string]any{"thinking": "off"},
+		Model:                "gpt-4o",
+		Messages:             []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata:             map[string]any{"thinking": "off"},
+		ReasoningPolicyScope: llm.ReasoningPolicyScopeStructuredVisionRecognition,
 	}, false)
 	if err != nil {
 		t.Fatal(err)
@@ -225,16 +226,19 @@ func TestBuildRequestBody_OpenAIReasoningModelMapsThinkingModeToReasoningEffort(
 	tests := []struct {
 		name     string
 		metadata map[string]any
+		scope    llm.ReasoningPolicyScope
 		want     string
 	}{
 		{
-			name:     "thinking on uses high effort",
+			name:     "scoped thinking on uses high effort",
 			metadata: map[string]any{"thinking": "on"},
+			scope:    llm.ReasoningPolicyScopeStructuredVisionRecognition,
 			want:     "high",
 		},
 		{
-			name:     "thinking off disables reasoning when model supports none",
+			name:     "scoped thinking off disables reasoning when model supports none",
 			metadata: map[string]any{"thinking": "off"},
+			scope:    llm.ReasoningPolicyScopeStructuredVisionRecognition,
 			want:     "none",
 		},
 		{
@@ -250,9 +254,10 @@ func TestBuildRequestBody_OpenAIReasoningModelMapsThinkingModeToReasoningEffort(
 			// not silently lose the standard reasoning_effort parameter.
 			p := New("k", WithBaseURL("http://localhost:18080/v1"))
 			body, err := p.buildRequestBody(llm.CompletionRequest{
-				Model:    "gpt-5.6-sol",
-				Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
-				Metadata: tt.metadata,
+				Model:                "gpt-5.6-sol",
+				Messages:             []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+				Metadata:             tt.metadata,
+				ReasoningPolicyScope: tt.scope,
 			}, true)
 			if err != nil {
 				t.Fatal(err)
@@ -272,12 +277,41 @@ func TestBuildRequestBody_OpenAIReasoningModelMapsThinkingModeToReasoningEffort(
 	}
 }
 
+func TestBuildRequestBody_OpenAIReasoningModelDoesNotInferReasoningEffortWithoutTypedScope(t *testing.T) {
+	for _, thinking := range []string{"on", "off"} {
+		t.Run(thinking, func(t *testing.T) {
+			p := New("k", WithBaseURL("http://localhost:18080/v1"))
+			body, err := p.buildRequestBody(llm.CompletionRequest{
+				Model:    "gpt-5.6-sol",
+				Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+				Metadata: map[string]any{"thinking": thinking},
+			}, true)
+			if err != nil {
+				t.Fatal(err)
+			}
+
+			var payload map[string]any
+			if err := json.Unmarshal(body, &payload); err != nil {
+				t.Fatal(err)
+			}
+			if _, ok := payload["reasoning_effort"]; ok {
+				t.Fatalf(
+					"unscoped thinking=%q must not change OpenAI wire: %v",
+					thinking,
+					payload,
+				)
+			}
+		})
+	}
+}
+
 func TestBuildRequestBody_NonReasoningOpenAIModelDoesNotInferReasoningEffort(t *testing.T) {
 	p := New("k", WithBaseURL("http://localhost:18080/v1"))
 	body, err := p.buildRequestBody(llm.CompletionRequest{
-		Model:    "gpt-4o",
-		Messages: []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
-		Metadata: map[string]any{"thinking": "on"},
+		Model:                "gpt-4o",
+		Messages:             []llm.Message{{Role: llm.RoleUser, Content: "hi"}},
+		Metadata:             map[string]any{"thinking": "off"},
+		ReasoningPolicyScope: llm.ReasoningPolicyScopeStructuredVisionRecognition,
 	}, true)
 	if err != nil {
 		t.Fatal(err)

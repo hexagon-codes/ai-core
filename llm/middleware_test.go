@@ -347,6 +347,36 @@ func TestCacheMiddleware(t *testing.T) {
 	}
 }
 
+func TestCacheMiddleware_BeforeSendHookBypassesCache(t *testing.T) {
+	mock := &mockProvider{
+		name:         "test",
+		completeResp: &CompletionResponse{Content: "fresh"},
+	}
+	cache := &inMemoryTestCache{data: make(map[string]*CompletionResponse)}
+	p := Chain(mock, WithCache(cache, nil))
+	req := CompletionRequest{
+		Model:    "gpt-5.6-sol",
+		Messages: []Message{{Role: RoleUser, Content: "recognize"}},
+	}
+
+	if _, err := p.Complete(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
+	ctx := WithBeforeSendHook(
+		context.Background(),
+		func(context.Context) error { return nil },
+	)
+	if _, err := p.Complete(ctx, req); err != nil {
+		t.Fatal(err)
+	}
+	if mock.callCount.Load() != 2 {
+		t.Fatalf(
+			"a request carrying a physical send hook must bypass response cache, provider calls=%d want=2",
+			mock.callCount.Load(),
+		)
+	}
+}
+
 func TestDefaultCacheKey_IncludesMultiContent(t *testing.T) {
 	key1 := defaultCacheKey(&CompletionRequest{
 		Model: "gpt-4o",
@@ -382,6 +412,20 @@ func TestDefaultCacheKey_IncludesMetadata(t *testing.T) {
 
 	if key1 == key2 {
 		t.Fatal("metadata that changes upstream request semantics must affect cache key")
+	}
+}
+
+func TestDefaultCacheKey_IncludesReasoningPolicyScope(t *testing.T) {
+	base := CompletionRequest{
+		Model:    "gpt-5.6-sol",
+		Messages: []Message{{Role: RoleUser, Content: "recognize"}},
+		Metadata: map[string]any{"thinking": "off"},
+	}
+	scoped := base
+	scoped.ReasoningPolicyScope = ReasoningPolicyScopeStructuredVisionRecognition
+
+	if defaultCacheKey(&base) == defaultCacheKey(&scoped) {
+		t.Fatal("typed reasoning policy scope must partition the response cache")
 	}
 }
 
