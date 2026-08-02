@@ -22,14 +22,54 @@ package qdrant
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
+	"math"
+	"net"
 	"net/http"
+	"net/url"
+	"regexp"
+	"sort"
+	"strings"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/store/vector"
 )
+
+const defaultMaxResponseBytes int64 = 32 << 20
+
+var (
+	// ErrInvalidConfig reports a configuration rejected before any network
+	// access. Callers can use errors.Is to distinguish it from availability
+	// failures.
+	ErrInvalidConfig = errors.New("qdrant: invalid configuration")
+	// ErrInvalidDocument reports a document that cannot be represented without
+	// corrupting Qdrant identity or vector-space invariants.
+	ErrInvalidDocument = errors.New("qdrant: invalid document")
+	// ErrInvalidSearch reports an invalid limit or query vector before an HTTP
+	// request is emitted.
+	ErrInvalidSearch = errors.New("qdrant: invalid search")
+	// ErrResponseTooLarge prevents an untrusted Qdrant/proxy response from
+	// growing process memory without a bound.
+	ErrResponseTooLarge = errors.New("qdrant: response exceeds configured limit")
+
+	collectionNamePattern = regexp.MustCompile(`^[A-Za-z0-9][A-Za-z0-9._-]{0,254}$`)
+	hostnamePattern       = regexp.MustCompile(`^[A-Za-z0-9](?:[A-Za-z0-9.-]{0,251}[A-Za-z0-9])?$`)
+)
+
+// HTTPError is a redacted status-only Qdrant response error. Response bodies
+// are intentionally not retained because reverse proxies may echo secrets or
+// request payloads.
+type HTTPError struct {
+	StatusCode int
+}
+
+func (e *HTTPError) Error() string {
+	return fmt.Sprintf("qdrant request failed with status %d", e.StatusCode)
+}
 
 // Config Qdrant 配置
 type Config struct {
@@ -62,6 +102,15 @@ type Config struct {
 
 	// CreateCollection 如果集合不存在是否自动创建
 	CreateCollection bool
+
+	// PointIDStrategy controls how arbitrary document IDs are represented by
+	// Qdrant's uint-or-UUID point identity. Zero defaults to UUIDv8.
+	PointIDStrategy PointIDStrategy
+
+	// MaxResponseBytes bounds every HTTP response body. Zero uses a safe
+	// default. Search callers that intentionally return very large payloads may
+	// raise it explicitly.
+	MaxResponseBytes int64
 }
 
 // Distance 距离度量方式
@@ -74,6 +123,18 @@ const (
 	DistanceEuclid Distance = "Euclid"
 	// DistanceDot 点积
 	DistanceDot Distance = "Dot"
+)
+
+// PointIDStrategy selects the persisted point-ID encoding.
+type PointIDStrategy string
+
+const (
+	// PointIDUUIDv8 is the safe default for new collections.
+	PointIDUUIDv8 PointIDStrategy = "sha256_uuid_v8"
+	// PointIDLegacyHash31 exists only to let existing collections be read and
+	// reindexed during migration.
+	// Deprecated: deterministic collisions can overwrite unrelated documents.
+	PointIDLegacyHash31 PointIDStrategy = "legacy_hash31"
 )
 
 // Store Qdrant 向量存储
@@ -102,8 +163,17 @@ func New(cfg Config) (*Store, error) {
 	if cfg.Timeout == 0 {
 		cfg.Timeout = 30 * time.Second
 	}
+	if cfg.MaxResponseBytes == 0 {
+		cfg.MaxResponseBytes = defaultMaxResponseBytes
+	}
 	if cfg.Distance == "" {
 		cfg.Distance = DistanceCosine
+	}
+	if cfg.PointIDStrategy == "" {
+		cfg.PointIDStrategy = PointIDUUIDv8
+	}
+	if err := validateConfig(cfg); err != nil {
+		return nil, err
 	}
 
 	scheme := "http"
@@ -111,10 +181,14 @@ func New(cfg Config) (*Store, error) {
 		scheme = "https"
 	}
 
+	endpoint := url.URL{
+		Scheme: scheme,
+		Host:   net.JoinHostPort(cfg.Host, fmt.Sprintf("%d", cfg.Port)),
+	}
 	s := &Store{
 		config:  cfg,
 		client:  &http.Client{Timeout: cfg.Timeout},
-		baseURL: fmt.Sprintf("%s://%s:%d", scheme, cfg.Host, cfg.Port),
+		baseURL: endpoint.String(),
 	}
 
 	// 检查连接
@@ -132,6 +206,42 @@ func New(cfg Config) (*Store, error) {
 	return s, nil
 }
 
+func validateConfig(cfg Config) error {
+	host := strings.TrimSpace(cfg.Host)
+	if host == "" || strings.ContainsAny(host, `/\\@?#`) {
+		return fmt.Errorf("%w: host", ErrInvalidConfig)
+	}
+	if net.ParseIP(host) == nil && !hostnamePattern.MatchString(host) {
+		return fmt.Errorf("%w: host", ErrInvalidConfig)
+	}
+	if cfg.Port < 1 || cfg.Port > 65535 {
+		return fmt.Errorf("%w: port", ErrInvalidConfig)
+	}
+	if !collectionNamePattern.MatchString(cfg.Collection) {
+		return fmt.Errorf("%w: collection", ErrInvalidConfig)
+	}
+	if cfg.Dimension <= 0 {
+		return fmt.Errorf("%w: dimension", ErrInvalidConfig)
+	}
+	if cfg.Timeout <= 0 {
+		return fmt.Errorf("%w: timeout", ErrInvalidConfig)
+	}
+	if cfg.MaxResponseBytes <= 0 {
+		return fmt.Errorf("%w: max response bytes", ErrInvalidConfig)
+	}
+	switch cfg.Distance {
+	case DistanceCosine, DistanceEuclid, DistanceDot:
+	default:
+		return fmt.Errorf("%w: distance", ErrInvalidConfig)
+	}
+	switch cfg.PointIDStrategy {
+	case PointIDUUIDv8, PointIDLegacyHash31:
+	default:
+		return fmt.Errorf("%w: point ID strategy", ErrInvalidConfig)
+	}
+	return nil
+}
+
 // healthCheck 健康检查
 func (s *Store) healthCheck(ctx context.Context) error {
 	_, err := s.doRequest(ctx, "GET", "/", nil)
@@ -144,6 +254,10 @@ func (s *Store) ensureCollection(ctx context.Context) error {
 	_, err := s.doRequest(ctx, "GET", "/collections/"+s.config.Collection, nil)
 	if err == nil {
 		return nil // 集合已存在
+	}
+	var httpErr *HTTPError
+	if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+		return fmt.Errorf("failed to inspect collection: %w", err)
 	}
 
 	// 创建集合
@@ -165,8 +279,16 @@ func (s *Store) ensureCollection(ctx context.Context) error {
 
 // Add 添加文档
 func (s *Store) Add(ctx context.Context, docs []vector.Document) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
 	if len(docs) == 0 {
 		return nil
+	}
+	for i := range docs {
+		if err := s.validateDocument(docs[i]); err != nil {
+			return fmt.Errorf("document %d: %w", i, err)
+		}
 	}
 
 	points := make([]map[string]any, len(docs))
@@ -192,7 +314,7 @@ func (s *Store) Add(ctx context.Context, docs []vector.Document) error {
 		"points": points,
 	}
 
-	_, err := s.doRequest(ctx, "PUT", "/collections/"+s.config.Collection+"/points", req)
+	_, err := s.doRequest(ctx, "PUT", "/collections/"+s.config.Collection+"/points?wait=true", req)
 	if err != nil {
 		return fmt.Errorf("failed to add documents: %w", err)
 	}
@@ -202,6 +324,18 @@ func (s *Store) Add(ctx context.Context, docs []vector.Document) error {
 
 // Search 搜索相似文档
 func (s *Store) Search(ctx context.Context, query []float32, k int, opts ...vector.SearchOption) ([]vector.Document, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	if k <= 0 {
+		return nil, fmt.Errorf("%w: limit must be positive", ErrInvalidSearch)
+	}
+	if len(query) != s.config.Dimension {
+		return nil, fmt.Errorf("%w: vector dimension %d, want %d", ErrInvalidSearch, len(query), s.config.Dimension)
+	}
+	if !isFiniteVector(query) {
+		return nil, fmt.Errorf("%w: vector contains a non-finite value", ErrInvalidSearch)
+	}
 	cfg := &vector.SearchConfig{
 		IncludeMetadata: true,
 	}
@@ -275,6 +409,33 @@ func (s *Store) Search(ctx context.Context, query []float32, k int, opts ...vect
 	return docs, nil
 }
 
+func (s *Store) validateDocument(doc vector.Document) error {
+	if strings.TrimSpace(doc.ID) == "" {
+		return fmt.Errorf("%w: ID must not be empty", ErrInvalidDocument)
+	}
+	if len(doc.Embedding) != s.config.Dimension {
+		return fmt.Errorf("%w: vector dimension %d, want %d", ErrInvalidDocument, len(doc.Embedding), s.config.Dimension)
+	}
+	if !isFiniteVector(doc.Embedding) {
+		return fmt.Errorf("%w: vector contains a non-finite value", ErrInvalidDocument)
+	}
+	for _, key := range []string{"content", "created_at", "_original_id"} {
+		if _, exists := doc.Metadata[key]; exists {
+			return fmt.Errorf("%w: metadata key %q is reserved", ErrInvalidDocument, key)
+		}
+	}
+	return nil
+}
+
+func isFiniteVector(values []float32) bool {
+	for _, value := range values {
+		if math.IsNaN(float64(value)) || math.IsInf(float64(value), 0) {
+			return false
+		}
+	}
+	return true
+}
+
 // Get 根据 ID 获取文档
 func (s *Store) Get(ctx context.Context, id string) (*vector.Document, error) {
 	req := map[string]any{
@@ -339,7 +500,7 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 		"points": pointIDs,
 	}
 
-	_, err := s.doRequest(ctx, "POST", "/collections/"+s.config.Collection+"/points/delete", req)
+	_, err := s.doRequest(ctx, "POST", "/collections/"+s.config.Collection+"/points/delete?wait=true", req)
 	if err != nil {
 		return fmt.Errorf("delete failed: %w", err)
 	}
@@ -350,7 +511,13 @@ func (s *Store) Delete(ctx context.Context, ids []string) error {
 // Clear 清空存储
 func (s *Store) Clear(ctx context.Context) error {
 	// 删除并重新创建集合
-	_, _ = s.doRequest(ctx, "DELETE", "/collections/"+s.config.Collection, nil)
+	_, err := s.doRequest(ctx, "DELETE", "/collections/"+s.config.Collection, nil)
+	if err != nil {
+		var httpErr *HTTPError
+		if !errors.As(err, &httpErr) || httpErr.StatusCode != http.StatusNotFound {
+			return fmt.Errorf("failed to clear collection: %w", err)
+		}
+	}
 
 	return s.ensureCollection(ctx)
 }
@@ -408,13 +575,20 @@ func (s *Store) doRequest(ctx context.Context, method, path string, body any) ([
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(resp.Body)
+	maxResponseBytes := s.config.MaxResponseBytes
+	if maxResponseBytes <= 0 {
+		maxResponseBytes = defaultMaxResponseBytes
+	}
+	respBody, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response: %w", err)
 	}
+	if int64(len(respBody)) > maxResponseBytes {
+		return nil, ErrResponseTooLarge
+	}
 
 	if resp.StatusCode >= 400 {
-		return nil, fmt.Errorf("request failed with status %d: %s", resp.StatusCode, string(respBody))
+		return nil, &HTTPError{StatusCode: resp.StatusCode}
 	}
 
 	return respBody, nil
@@ -422,7 +596,22 @@ func (s *Store) doRequest(ctx context.Context, method, path string, body any) ([
 
 // toPointID 将字符串 ID 转换为 Qdrant 支持的格式
 func (s *Store) toPointID(id string) any {
-	// 使用 ID 的 hash 作为整数 ID
+	if s.config.PointIDStrategy == PointIDLegacyHash31 {
+		return legacyPointID(id)
+	}
+	// Qdrant accepts unsigned integers or UUIDs, not arbitrary strings. The
+	// former 31-based uint64 hash had trivial deterministic collisions (for
+	// example "Aa" and "BB") and could overwrite an unrelated document.
+	// Derive an RFC 9562 UUIDv8-shaped identifier from SHA-256 instead. The
+	// original ID remains in the payload and is authoritative on reads.
+	digest := sha256.Sum256([]byte(id))
+	digest[6] = (digest[6] & 0x0f) | 0x80 // custom UUID version 8
+	digest[8] = (digest[8] & 0x3f) | 0x80 // RFC 4122/9562 variant
+	hexDigest := fmt.Sprintf("%x", digest[:16])
+	return hexDigest[:8] + "-" + hexDigest[8:12] + "-" + hexDigest[12:16] + "-" + hexDigest[16:20] + "-" + hexDigest[20:32]
+}
+
+func legacyPointID(id string) uint64 {
 	var hash uint64
 	for i := 0; i < len(id); i++ {
 		hash = hash*31 + uint64(id[i])
@@ -455,11 +644,16 @@ func (s *Store) fromPointID(id any, payload map[string]any) string {
 // buildFilter 构建过滤条件
 func (s *Store) buildFilter(filter map[string]any) map[string]any {
 	conditions := make([]map[string]any, 0, len(filter))
+	keys := make([]string, 0, len(filter))
+	for key := range filter {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
 
-	for k, v := range filter {
+	for _, k := range keys {
 		conditions = append(conditions, map[string]any{
 			"key":   k,
-			"match": map[string]any{"value": v},
+			"match": map[string]any{"value": filter[k]},
 		})
 	}
 

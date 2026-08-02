@@ -3,6 +3,7 @@ package qdrant
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -10,6 +11,11 @@ import (
 	"github.com/hexagon-codes/ai-core/store/vector"
 	"github.com/hexagon-codes/toolkit/util/retry"
 )
+
+// ErrInvalidBatchConfig is returned before launching workers. It prevents
+// zero-sized loops, zero-capacity semaphore deadlocks, and invalid retry
+// policies from turning caller mistakes into hangs or panics.
+var ErrInvalidBatchConfig = errors.New("qdrant: invalid batch configuration")
 
 // BatchConfig 批量操作配置
 type BatchConfig struct {
@@ -85,6 +91,9 @@ func (s *Store) AddBatch(ctx context.Context, docs []vector.Document, opts ...Ba
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if err := validateBatchConfig(cfg); err != nil {
+		return err
+	}
 
 	if len(docs) == 0 {
 		return nil
@@ -112,7 +121,12 @@ func (s *Store) AddBatch(ctx context.Context, docs []vector.Document, opts ...Ba
 		go func(idx int, batch []vector.Document) {
 			defer wg.Done()
 
-			sem <- struct{}{}
+			select {
+			case sem <- struct{}{}:
+			case <-ctx.Done():
+				errCh <- ctx.Err()
+				return
+			}
 			defer func() { <-sem }()
 
 			// 使用 toolkit retry 进行重试
@@ -163,6 +177,9 @@ func (s *Store) DeleteBatch(ctx context.Context, ids []string, opts ...BatchOpti
 	for _, opt := range opts {
 		opt(&cfg)
 	}
+	if err := validateBatchConfig(cfg); err != nil {
+		return err
+	}
 
 	if len(ids) == 0 {
 		return nil
@@ -198,6 +215,21 @@ func (s *Store) DeleteBatch(ctx context.Context, ids []string, opts ...BatchOpti
 	}
 
 	return nil
+}
+
+func validateBatchConfig(cfg BatchConfig) error {
+	switch {
+	case cfg.BatchSize <= 0:
+		return fmt.Errorf("%w: batch size must be positive", ErrInvalidBatchConfig)
+	case cfg.Concurrency <= 0:
+		return fmt.Errorf("%w: concurrency must be positive", ErrInvalidBatchConfig)
+	case cfg.RetryCount < 0:
+		return fmt.Errorf("%w: retry count must not be negative", ErrInvalidBatchConfig)
+	case cfg.RetryDelay < 0:
+		return fmt.Errorf("%w: retry delay must not be negative", ErrInvalidBatchConfig)
+	default:
+		return nil
+	}
 }
 
 // Scroll 滚动获取所有文档

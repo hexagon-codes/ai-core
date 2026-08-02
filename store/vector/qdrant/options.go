@@ -75,6 +75,20 @@ func WithCreateCollection(create bool) Option {
 	}
 }
 
+// WithPointIDStrategy selects the persisted Qdrant point-ID encoding.
+func WithPointIDStrategy(strategy PointIDStrategy) Option {
+	return func(c *Config) {
+		c.PointIDStrategy = strategy
+	}
+}
+
+// WithMaxResponseBytes sets the maximum accepted Qdrant HTTP response body.
+func WithMaxResponseBytes(limit int64) Option {
+	return func(c *Config) {
+		c.MaxResponseBytes = limit
+	}
+}
+
 // NewWithOptions 使用选项创建 Qdrant 存储
 //
 // 示例：
