@@ -516,17 +516,17 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 		default:
 		}
 
-		line, err := s.reader.ReadString('\n')
-		if err != nil {
-			if err != io.EOF {
-				s.sendErrorWithCallback(err, onError)
-			}
-			s.finalize(contentBuf.String(), onDone)
-			return
+		line, readErr := s.reader.ReadString('\n')
+		if readErr != nil && !errors.Is(readErr, io.EOF) {
+			s.sendErrorWithCallback(readErr, onError)
 		}
 
 		line = strings.TrimSpace(line)
 		if line == "" {
+			if readErr != nil {
+				s.finalize(contentBuf.String(), onDone)
+				return
+			}
 			continue
 		}
 
@@ -596,6 +596,14 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 				s.finalize(contentBuf.String(), onDone)
 				return
 			}
+		}
+
+		// io.Reader is allowed to return data and io.EOF together. Process that
+		// final frame before terminating so providers and proxies that omit the
+		// trailing newline cannot silently lose the last token/tool delta.
+		if readErr != nil {
+			s.finalize(contentBuf.String(), onDone)
+			return
 		}
 	}
 }
