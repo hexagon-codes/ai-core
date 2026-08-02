@@ -4,6 +4,7 @@
 
 ## [Unreleased]
 ### Added
+- `store/vector/qdrant`：新增 `MaxResponseBytes`、`WithMaxResponseBytes`、类型化配置/HTTP/文档/检索错误，以及显式的 `PointIDStrategy` 迁移开关。
 - `schema`：`Schema` 新增 `anyOf`、`oneOf`、`allOf`、`not` 组合关键字；仅由组合关键字构成的 Schema 会省略空 `type`，并在 JSON 序列化时保留各分支约束。
 - `llm` / `transport`：新增操作级自动重放契约 `OperationSafety` / `WithOperationSafety`；标记为 `OperationSafetyNonIdempotent` 时，LLM 重试中间件、OpenAI 响应解码重试、Router 重试与 fallback、共享 HTTP transport 均不自动重放，未标记请求保持既有重试策略。
 - `streamx`：`Chunk` 新增 `ReasoningDisclosure`，并提供 `ReasoningDisclosureEvidence` 可信来源契约；OpenAI-compatible 与 Ollama 的推理数据块会附带已知来源和方言，只有明确公开且 Provider / Model 证据完整的冻结路由可标记为 `visible`，缺失证据或未知方言失败关闭为 `not_exposed`。
@@ -15,6 +16,9 @@
 - `media/voice`：新增 ElevenLabs TTS Provider。
 
 ### Changed
+- **BREAKING（Qdrant 持久数据）**：Qdrant 新集合的默认 point ID 从易碰撞的 31 倍 `uint64` 哈希改为 SHA-256 派生 UUIDv8。已有集合升级前应完成重建；迁移窗口可显式使用已弃用的 `PointIDLegacyHash31` 读取旧映射，但不得继续用于新数据。
+- `store/vector/qdrant`：构造阶段严格校验 host/port/collection/dimension/distance/timeout；写入与删除固定 `wait=true`，只有集合查询明确返回 404 时才自动创建，`Clear` 不再吞掉删除失败；批配置非法时在启动 goroutine 前失败关闭。
+- CI：第三方 GitHub Actions 全部固定到不可变 commit SHA，`gorelease`/`govulncheck` 固定工具版本，并在 release tag 构建时校验 `VERSION` 与 tag 一致。
 - `llm/openai`：仅当请求以 `ReasoningPolicyScopeStructuredVisionRecognition` 显式声明结构化视觉识别作用域时，OpenAI 推理模型才会把 `thinking` 元数据推断为标准 `reasoning_effort`（`on` → `high`，`off` → 模型支持的最低强度；GPT-5.1+ 为 `none`、GPT-5 为 `minimal`、o1/o3/o4 与 `codex-*` 为 `low`）；零值作用域保持既有 wire 不变，显式 `reasoning_effort` 仍独立透传且优先，非推理模型不做推断，私有或 loopback compatible 网关也不会丢失该参数，并继续与厂商方言 `enable_thinking` 隔离。
 - 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
 - `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
@@ -26,6 +30,8 @@
 - 依赖：`github.com/hexagon-codes/toolkit` v0.2.3 → v0.2.6；`go` 指令随 toolkit 要求提升至 1.25.7。
 
 ### Fixed
+- `streamx`：处理 `io.Reader` 同时返回末帧数据与 `io.EOF` 的合法情况，避免无尾换行 SSE/JSONL 丢失最后一个 token、finish reason 或 tool delta。
+- `store/vector/qdrant`：阻止不同文档 ID 的确定性哈希碰撞覆盖、metadata 覆盖内部 `_original_id/content/created_at` 字段、无界响应读取、认证错误触发错误建库，以及 `Clear` 删除失败后伪成功。
 - `streamx.Stream.Close`：先关闭底层 reader 再等待后台 goroutine，避免 processLoop 阻塞在读输入时 `Close()` 卡住；`Collect()` 在 chunk channel 关闭后补读一次错误通道，避免漏报末尾错误。
 - `media/video`：`content_moderated` 映射为失败终态，避免审核拦截后 `WaitFor` 长时间继续轮询。
 - `media` Submit 重试策略：计费型任务创建请求未提供 `IdempotencyKey` 时禁用自动重试，避免二义性失败后重复创建任务和重复计费。
