@@ -228,6 +228,15 @@ type Stream struct {
 	onChunk func(*Chunk)       // 块处理回调
 	onDone  func(*Result)      // 完成回调
 	onError func(error)        // 错误回调
+	// onFirstChunk observers are additive and used for TTFT/resource metrics.
+	onFirstChunk []func()
+	firstChunk   bool
+	// onTerminal observers are composable lifecycle hooks. Unlike OnDone,
+	// they run for normal EOF, cancellation, parse/read termination, and an
+	// explicit Close before Start. They carry no response payload by design.
+	onTerminal []func()
+	terminal   bool
+	streamErr  error
 }
 
 // ChunkParser 定义块解析器接口
@@ -355,13 +364,53 @@ func (s *Stream) OnError(fn func(error)) *Stream {
 	return s
 }
 
+// OnTerminal registers a lifecycle observer that runs exactly once when the
+// stream can no longer produce chunks. Multiple observers compose instead of
+// replacing one another. Registering after termination invokes fn immediately.
+//
+// The callback must remain non-blocking and must not consume this stream. It is
+// intended for resource release, tracing, and other terminal bookkeeping. It
+// must not call Close, Result, Collect, or wait on Done.
+func (s *Stream) OnTerminal(fn func()) *Stream {
+	if fn == nil {
+		return s
+	}
+	s.mu.Lock()
+	if !s.terminal {
+		s.onTerminal = append(s.onTerminal, fn)
+		s.mu.Unlock()
+		return s
+	}
+	s.mu.Unlock()
+	runLifecycleObserver(fn)
+	return s
+}
+
+// OnFirstChunk registers an additive observer for the first parsed chunk.
+// Registering after the first chunk invokes fn immediately. The callback must
+// remain non-blocking and must not consume this stream.
+func (s *Stream) OnFirstChunk(fn func()) *Stream {
+	if fn == nil {
+		return s
+	}
+	s.mu.Lock()
+	if !s.firstChunk {
+		s.onFirstChunk = append(s.onFirstChunk, fn)
+		s.mu.Unlock()
+		return s
+	}
+	s.mu.Unlock()
+	runLifecycleObserver(fn)
+	return s
+}
+
 // Start 开始处理流
 // 启动后台 goroutine 读取和解析数据
 // 此方法是非阻塞的，立即返回
 // 多次调用是安全的，只有首次调用会启动处理
 func (s *Stream) Start() *Stream {
 	s.mu.Lock()
-	if s.started {
+	if s.started || s.closed || s.terminal {
 		s.mu.Unlock()
 		return s
 	}
@@ -374,7 +423,10 @@ func (s *Stream) Start() *Stream {
 	s.mu.Unlock()
 
 	go func() {
-		defer s.wg.Done()
+		defer func() {
+			s.finishTerminal()
+			s.wg.Done()
+		}()
 		s.processLoop(onChunk, onDone, onError)
 	}()
 	return s
@@ -406,6 +458,18 @@ func (s *Stream) Errors() <-chan error {
 // 可用于等待流处理完成
 func (s *Stream) Done() <-chan struct{} {
 	return s.done
+}
+
+// Err returns the first stream-processing or cancellation error observed by
+// this stream. It never consumes the Errors channel and is therefore safe for
+// additive terminal observers and resource accounting.
+func (s *Stream) Err() error {
+	if s == nil {
+		return ErrStreamClosed
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.streamErr
 }
 
 // Result 阻塞等待并返回完整结果
@@ -440,7 +504,10 @@ func (s *Stream) Collect() (*Result, error) {
 		select {
 		case _, ok := <-s.chunks:
 			if !ok {
-				// 通道关闭，处理完成
+				// Chunks closes before terminal lifecycle observers run. Wait for
+				// Done so Collect cannot return while provider admission/tracing
+				// cleanup is still in flight.
+				<-s.done
 				select {
 				case err := <-s.errors:
 					if err != nil {
@@ -460,8 +527,20 @@ func (s *Stream) Collect() (*Result, error) {
 
 		case <-s.ctx.Done():
 			s.mu.Lock()
+			terminal := s.terminal
 			result := s.result
 			s.mu.Unlock()
+			if terminal {
+				// Terminal observers may cancel the provider context as cleanup
+				// after a normal EOF. Once terminal publication has begun, Done and
+				// streamErr—not the cleanup cancellation race—are authoritative.
+				<-s.done
+				s.mu.Lock()
+				result = s.result
+				terminalErr := s.streamErr
+				s.mu.Unlock()
+				return result, terminalErr
+			}
 			return result, s.ctx.Err()
 		}
 	}
@@ -489,6 +568,7 @@ func (s *Stream) Close() error {
 
 	// 关闭底层 reader 后再等待，确保阻塞中的 ReadString 能被唤醒。
 	s.wg.Wait()
+	s.finishTerminal()
 	return closeErr
 }
 
@@ -504,9 +584,6 @@ func (s *Stream) Close() error {
 // ReadUntilDone 解决了 Provider done 检测，事件分帧粒度差异仍未被覆盖，本路径
 // 保留本地行级实现（正确性优先，详见 sse_boundary_test.go 头注与该夹具）。
 func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError func(error)) {
-	defer close(s.chunks)
-	defer close(s.done)
-
 	var contentBuf bytes.Buffer
 
 	for {
@@ -556,6 +633,7 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 		}
 
 		if chunk != nil {
+			s.notifyFirstChunk()
 			contentBuf.WriteString(chunk.Content)
 
 			// 更新结果（加锁保护）
@@ -608,6 +686,51 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 	}
 }
 
+func (s *Stream) notifyFirstChunk() {
+	s.mu.Lock()
+	if s.firstChunk {
+		s.mu.Unlock()
+		return
+	}
+	s.firstChunk = true
+	callbacks := append([]func(){}, s.onFirstChunk...)
+	s.onFirstChunk = nil
+	s.mu.Unlock()
+	for _, callback := range callbacks {
+		runLifecycleObserver(callback)
+	}
+}
+
+func runLifecycleObserver(callback func()) {
+	defer func() { _ = recover() }()
+	callback()
+}
+
+// finishTerminal owns terminal publication. The boolean is protected by mu so
+// Close and the reader goroutine can converge without a double channel close.
+// Chunks closes before callbacks, while Done closes only after all lifecycle
+// observers (for example admission-permit release) have completed.
+func (s *Stream) finishTerminal() {
+	s.mu.Lock()
+	if s.terminal {
+		s.mu.Unlock()
+		return
+	}
+	s.terminal = true
+	if s.streamErr == nil && s.ctx.Err() != nil {
+		s.streamErr = s.ctx.Err()
+	}
+	callbacks := append([]func(){}, s.onTerminal...)
+	s.onTerminal = nil
+	s.mu.Unlock()
+
+	close(s.chunks)
+	defer close(s.done)
+	for _, callback := range callbacks {
+		runLifecycleObserver(callback)
+	}
+}
+
 // finalize 收尾流处理：把累计正文落入 result，做工具调用兜底还原，再触发 onDone。
 //
 // processLoop 的三处结束分支（EOF/读错、解析失败遇 DONE、正常遇 DONE）共用本方法，
@@ -636,6 +759,11 @@ func (s *Stream) finalize(content string, onDone func(*Result)) {
 // sendErrorWithCallback 发送错误到错误通道并触发回调
 // 错误通道有缓冲但不阻塞，如果通道满则丢弃
 func (s *Stream) sendErrorWithCallback(err error, onError func(error)) {
+	s.mu.Lock()
+	if s.streamErr == nil {
+		s.streamErr = err
+	}
+	s.mu.Unlock()
 	if onError != nil {
 		onError(err)
 	}
