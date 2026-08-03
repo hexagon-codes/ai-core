@@ -30,10 +30,13 @@ const (
 	defaultBaseURL = "http://localhost:11434"
 	defaultModel   = "llama3.2"
 
-	defaultOllamaNumCtx             = 32768
-	maxAutomaticNumCtx              = 32768
-	defaultModelMaxTokens           = 32768
-	ollamaDefaultResponseHeaderWait = 120 * time.Second
+	defaultOllamaNumCtx   = 32768
+	maxAutomaticNumCtx    = 32768
+	defaultModelMaxTokens = 32768
+	// Complete and Stream share a transport safety ceiling long enough for a
+	// cold local prefill. Product/model contexts remain the authoritative,
+	// shorter SLO (for example HexClaw qwen3.5:9b at 360 seconds).
+	ollamaDefaultResponseHeaderWait = 10 * time.Minute
 	ollamaStreamResponseHeaderWait  = 10 * time.Minute
 
 	// defaultKeepAlive 每次请求随发的模型驻留时长（BUG-20260710）。
@@ -1190,9 +1193,9 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 }
 
 type ollamaStreamParser struct {
-	onSuccess        func()
-	onFailure        func()
-	successOnce      sync.Once
+	onSuccess         func()
+	onFailure         func()
+	successOnce       sync.Once
 	reasoningEvidence streamx.ReasoningDisclosureEvidence
 }
 

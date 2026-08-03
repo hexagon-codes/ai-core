@@ -3,11 +3,13 @@ package ollama
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -48,6 +50,41 @@ func TestNew_EnvAndOptions(t *testing.T) {
 	p = New(WithBaseURL("http://x"), WithModel("m"), WithHTTPClient(custom))
 	if p.baseURL != "http://x" || p.model != "m" || p.httpClient != custom || p.streamHTTPClient != custom {
 		t.Fatalf("选项未生效（应覆盖环境变量）: %+v", p)
+	}
+}
+
+func TestDefaultCompleteHeaderCeilingDoesNotPreemptSlowLocalModelPolicy(t *testing.T) {
+	if ollamaDefaultResponseHeaderWait < 360*time.Second {
+		t.Fatalf(
+			"default Complete response-header timeout=%v, want >=360s model policy ceiling",
+			ollamaDefaultResponseHeaderWait,
+		)
+	}
+	if ollamaDefaultResponseHeaderWait != ollamaStreamResponseHeaderWait {
+		t.Fatalf(
+			"Complete/Stream transport safety ceilings drifted: complete=%v stream=%v",
+			ollamaDefaultResponseHeaderWait, ollamaStreamResponseHeaderWait,
+		)
+	}
+}
+
+func TestCompleteHonorsShorterCallerDeadlineBeforeTransportSafetyCeiling(t *testing.T) {
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		time.Sleep(100 * time.Millisecond)
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"model":"qwen3.5:9b","done":true,"message":{"role":"assistant","content":"late"}}`))
+	}))
+	t.Cleanup(server.Close)
+	provider := New(WithBaseURL(server.URL), WithModel("qwen3.5:9b"))
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	started := time.Now()
+	_, err := provider.Complete(ctx, userReq("hello"))
+	if !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("Complete error=%v, want context deadline", err)
+	}
+	if elapsed := time.Since(started); elapsed >= 100*time.Millisecond {
+		t.Fatalf("caller deadline lost to transport ceiling: elapsed=%v", elapsed)
 	}
 }
 

@@ -19,8 +19,8 @@ package ollama
 //
 // 附带发现:(a) Ollama 会把过小的显式 num_ctx 钳到服务端最小值 2048;(b) 溢出截断上限
 // ≈ n_ctx/2(shift 规则),仅在 prompt 超过 n_ctx 后触发,选档公式保证 prompt<档位故不触发;
-// (c) num_ctx 变更触发的重载+长预填充可能超过非流式 120s response-header 超时
-// (ollamaDefaultResponseHeaderWait),故 E3 含一次重试。
+// (c) num_ctx 变更会触发重载+长预填充；transport 保留 10m safety ceiling，
+// 真实业务仍由调用方 context 限时，E3 的单次重试用于机器负载抖动取证。
 
 import (
 	"context"
@@ -106,7 +106,7 @@ func TestE2E_NumCtx(t *testing.T) {
 				return resp, el
 			}
 			lastErr = err
-			t.Logf("[%s] 第 %d 次失败(%.1fs): %v — 重载+长预填充可能超 120s header 超时,重试",
+			t.Logf("[%s] 第 %d 次失败(%.1fs): %v — 重载+长预填充失败，重试",
 				tag, attempt+1, el.Seconds(), err)
 		}
 		t.Fatalf("[%s] 重试后仍失败: %v", tag, lastErr)
