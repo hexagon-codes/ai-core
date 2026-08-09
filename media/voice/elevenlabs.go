@@ -39,7 +39,7 @@ func NewElevenLabsTTS(apiKey string, opts ...ElevenLabsOption) *ElevenLabsTTS {
 		baseURL:      defaultElevenLabsBase,
 		model:        "eleven_multilingual_v2",
 		defaultVoice: "Rachel",
-		client:       httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		client:       httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout:      60 * time.Second,
 	}
 	for _, opt := range opts {

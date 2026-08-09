@@ -78,7 +78,7 @@ func New(apiKey string, opts ...Option) *Provider {
 		apiKey:     apiKey,
 		baseURL:    defaultBaseURL,
 		model:      defaultModel,
-		httpClient: httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpClient: httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 	}
 
 	for _, opt := range opts {

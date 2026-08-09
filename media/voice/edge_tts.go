@@ -117,7 +117,7 @@ func NewEdgeTTS(opts ...EdgeTTSOption) *EdgeTTS {
 	t := &EdgeTTS{
 		defaultVoice: "zh-CN-XiaoxiaoNeural",
 		wssBase:      defaultEdgeTTSWSS,
-		httpClient:   httpx.RawClient(httpx.WithRawTimeout(60 * time.Second)),
+		httpClient:   httpx.MustNewRawClient(httpx.WithRawTimeout(60 * time.Second)),
 		timeout:      60 * time.Second,
 		gecVersion:   envOrDefault(edgeGECVersionEnv, defaultEdgeSecMSGECVersion),
 		userAgent:    envOrDefault(edgeUAEnv, defaultEdgeUserAgent),

@@ -102,7 +102,7 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 	//   - retry.Attempts(maxRetries): 总尝试次数（含首次），与旧 for 1..maxRetries 一致。
 	//   - retry.Delay(baseBackoff) + retry.Multiplier(2): 指数退避序列
 	//     baseBackoff*2^(n-1)（500ms、1s、2s…），与旧 baseBackoff*(1<<(attempt-1)) 逐项相同。
-	//   - retry.RetryIf(isTransient): 仅瞬时错误重试，非瞬时错误立即停止（等价旧 break）。
+	//   - retry.If(isTransient): 仅瞬时错误重试，非瞬时错误立即停止（等价旧 break）。
 	//   - retry.OnRetry: 一次失败且将重试时回调，n 为一基已尝试序号，
 	//     对应旧代码"以 attempt=n+1 发 StageRetrying"。
 	// ctx 取消/超时由 DoWithContext 在循环顶部与退避计时器中处理，直接返回 ctx.Err()。
@@ -127,7 +127,7 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 		// 旧实现退避无上限，故将 MaxDelay 设为实质无界（toolkit 默认 30s 会截断，
 		// 与旧 baseBackoff*2^(n-1) 不一致）；仅保留 toolkit 内部对 time.Duration 溢出的兜底。
 		retry.MaxDelay(time.Duration(math.MaxInt64)),
-		retry.RetryIf(isTransient),
+		retry.If(isTransient),
 		retry.OnRetry(func(n int, e error) {
 			emit(StageRetrying, n+1, e.Error())
 		}),

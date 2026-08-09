@@ -92,7 +92,7 @@ func newSeedance(name string, region SeedanceRegion, apiKey string, opts ...Seed
 		apiKey:  apiKey,
 		baseURL: baseURL,
 		models:  models,
-		httpc:   httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpc:   httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout: 60 * time.Second,
 	}
 	for _, opt := range opts {

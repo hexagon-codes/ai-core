@@ -77,9 +77,9 @@ func NewMiniMaxTTS(apiKey, groupID string, opts ...MiniMaxTTSOption) *MiniMaxTTS
 		groupID: groupID,
 		baseURL: "https://api.minimaxi.com",
 		model:   "speech-01-turbo",
-		// 沿用同包 OpenAI/Azure/Edge 既定约定，默认走 toolkit httpx.RawClient，
+		// 沿用同包 OpenAI/Azure/Edge 既定约定，默认走 toolkit httpx.MustNewRawClient，
 		// 复用统一的连接池 / Transport 预设，避免裸 &http.Client 各自为政。
-		client: httpx.RawClient(httpx.WithRawTimeout(30 * time.Second)),
+		client: httpx.MustNewRawClient(httpx.WithRawTimeout(30 * time.Second)),
 	}
 	for _, opt := range opts {
 		opt(t)

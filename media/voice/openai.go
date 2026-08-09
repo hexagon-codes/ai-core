@@ -102,7 +102,7 @@ func NewOpenAISTT(apiKey, model string, opts ...STTOption) *OpenAISTT {
 		apiKey:  apiKey,
 		model:   model,
 		baseURL: "https://api.openai.com/v1",
-		client:  httpx.RawClient(httpx.WithRawTimeout(60 * time.Second)),
+		client:  httpx.MustNewRawClient(httpx.WithRawTimeout(60 * time.Second)),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -279,7 +279,7 @@ func NewOpenAITTS(apiKey, model string, opts ...TTSOption) *OpenAITTS {
 		apiKey:  apiKey,
 		model:   model,
 		baseURL: "https://api.openai.com/v1",
-		client:  httpx.RawClient(httpx.WithRawTimeout(60 * time.Second)),
+		client:  httpx.MustNewRawClient(httpx.WithRawTimeout(60 * time.Second)),
 	}
 	for _, opt := range opts {
 		opt(t)

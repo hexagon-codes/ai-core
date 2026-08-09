@@ -122,8 +122,8 @@ func New(opts ...Option) *Provider {
 		// 不设全局 Timeout — 流式请求的超时由调用方 context 控制
 		// http.Client.Timeout 对流式响应会在整个读取期间生效，
 		// 本地模型推理可能需要数分钟
-		httpClient:       httpx.RawClient(httpx.WithResponseHeaderTimeout(ollamaDefaultResponseHeaderWait)),
-		streamHTTPClient: httpx.RawClient(httpx.WithResponseHeaderTimeout(ollamaStreamResponseHeaderWait)),
+		httpClient:       httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(ollamaDefaultResponseHeaderWait)),
+		streamHTTPClient: httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(ollamaStreamResponseHeaderWait)),
 		policy:           &defaultPolicy,
 	}
 

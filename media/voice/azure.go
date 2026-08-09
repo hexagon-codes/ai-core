@@ -63,7 +63,7 @@ func NewAzureSTT(subscriptionKey, region string, opts ...AzureSTTOption) *AzureS
 		subscriptionKey: subscriptionKey,
 		region:          region,
 		language:        "zh-CN",
-		client:          httpx.RawClient(httpx.WithRawTimeout(60 * time.Second)),
+		client:          httpx.MustNewRawClient(httpx.WithRawTimeout(60 * time.Second)),
 	}
 	for _, opt := range opts {
 		opt(s)
@@ -210,7 +210,7 @@ func NewAzureTTS(subscriptionKey, region string, opts ...AzureTTSOption) *AzureT
 		subscriptionKey: subscriptionKey,
 		region:          region,
 		defaultVoice:    "zh-CN-XiaoxiaoNeural",
-		client:          httpx.RawClient(httpx.WithRawTimeout(60 * time.Second)),
+		client:          httpx.MustNewRawClient(httpx.WithRawTimeout(60 * time.Second)),
 	}
 	for _, opt := range opts {
 		opt(t)

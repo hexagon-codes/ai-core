@@ -44,7 +44,7 @@ func NewFlux(apiKey string, opts ...FluxOption) interface {
 		apiKey:       apiKey,
 		baseURL:      defaultBFLBase,
 		models:       []string{"flux-pro-1.1", "flux-pro-1.1-ultra", "flux-kontext-pro", "flux-kontext-max", "flux-pro-1.0", "flux-dev"},
-		httpc:        httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpc:        httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout:      60 * time.Second,
 		pollInterval: 2 * time.Second,
 	}

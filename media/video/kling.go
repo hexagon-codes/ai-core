@@ -47,7 +47,7 @@ func NewKling(accessKey, secretKey string, opts ...KlingOption) Provider {
 		secretKey: secretKey,
 		baseURL:   defaultKlingBase,
 		models:    []string{"kling-v3", "kling-v2-1-master", "kling-v1-6", "kling-v1"},
-		httpc:     httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpc:     httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout:   60 * time.Second,
 		now:       time.Now,
 	}

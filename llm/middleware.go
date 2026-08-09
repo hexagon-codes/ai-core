@@ -124,7 +124,7 @@ func (p *retryProvider) retryOpts() []retry.Option {
 		retry.Delay(p.backoff),
 		retry.Multiplier(2),
 		retry.MaxDelay(30 * time.Second),
-		retry.RetryIf(func(err error) bool {
+		retry.If(func(err error) bool {
 			return isRetryableError(err)
 		}),
 	}

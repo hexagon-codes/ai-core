@@ -53,7 +53,7 @@ func NewCompatible(apiKey string, cfg CompatibleConfig, opts ...CompatibleOption
 	p := &compatibleProvider{
 		cfg:     cfg,
 		apiKey:  apiKey,
-		httpc:   httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpc:   httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout: 60 * time.Second,
 	}
 	for _, opt := range opts {

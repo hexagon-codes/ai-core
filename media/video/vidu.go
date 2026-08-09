@@ -35,7 +35,7 @@ func NewVidu(apiKey string, opts ...ViduOption) Provider {
 		apiKey:  apiKey,
 		baseURL: defaultViduBase,
 		models:  []string{"viduq3-pro-fast", "viduq3-turbo", "viduq3-pro", "viduq2-pro-fast", "viduq2-pro", "viduq2-turbo", "viduq2", "viduq1", "vidu2.0"},
-		httpc:   httpx.RawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
+		httpc:   httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(120 * time.Second)),
 		timeout: 60 * time.Second,
 	}
 	for _, opt := range opts {
