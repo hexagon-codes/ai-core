@@ -28,6 +28,8 @@
 - `streamx`：`CustomFormat` 支持原始 JSON Lines 流，兼容 Ollama 等非 SSE 上游，同时保留 `data:` SSE 解析路径。
 - `media` 统一任务状态归一化，新增 `TaskCancelled`，`TaskState.Terminal()` 覆盖成功、失败和取消。
 - 依赖：`github.com/hexagon-codes/toolkit` v0.2.3 → v0.2.6；`go` 指令随 toolkit 要求提升至 1.25.7。
+- 依赖：`github.com/hexagon-codes/toolkit` v0.2.6 → v0.3.4；`go` 指令随 toolkit 要求提升至 1.25.12。
+- `llm/middleware`、`llm/router`、`gateway/llmcall`：适配 toolkit v0.3.x 的 `util/retry` 重构——重试条件入口统一为 `If`，指数退避显式选择 `retry.DelayType(retry.ExponentialBackoff)` 搭配 `Multiplier`，重试耗尽错误固定同时包装 `ErrMaxAttemptsReached` 与最终业务错误；新增契约测试钉死"倍数参数必须显式声明指数策略"。
 
 ### Fixed
 - `streamx`：处理 `io.Reader` 同时返回末帧数据与 `io.EOF` 的合法情况，避免无尾换行 SSE/JSONL 丢失最后一个 token、finish reason 或 tool delta。
@@ -54,7 +56,7 @@
 
 ## [0.1.7]
 ### Changed
-- `gateway/llmcall`：`CallWithProgress` 的重试退避委托给 `toolkit/util/retry.DoWithContext`，替换手写 `for attempt` 循环。**行为保真**：退避序列 `baseBackoff*2^(n-1)`、仅瞬时错误重试（`RetryIf(isTransient)`）、ctx 取消/超时透传 `ctx.Err()`、`attempts` 计数与失败错误包装 `(attempts=maxRetries)` 均与旧实现逐项一致。
+- `gateway/llmcall`：`CallWithProgress` 的重试退避委托给 `toolkit/util/retry.DoWithContext`，替换手写 `for attempt` 循环。**行为保真**：退避序列 `baseBackoff*2^(n-1)`、仅瞬时错误重试（`If(isTransient)`）、ctx 取消/超时透传 `ctx.Err()`、`attempts` 计数与失败错误包装 `(attempts=maxRetries)` 均与旧实现逐项一致。
 - 依赖：`github.com/hexagon-codes/toolkit` v0.2.0 → v0.2.1（`net/httpx.RawClient` 默认遵循 `HTTP(S)_PROXY`/`NO_PROXY`）。
 
 ## [0.1.6]

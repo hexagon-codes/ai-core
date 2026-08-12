@@ -100,7 +100,7 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 	// 委托给 toolkit/util/retry.DoWithContext（参考 ai-core/llm/middleware.go、
 	// ai-core/llm/router/router.go 的用法）。
 	//   - retry.Attempts(maxRetries): 总尝试次数（含首次），与旧 for 1..maxRetries 一致。
-	//   - retry.Delay(baseBackoff) + retry.Multiplier(2): 指数退避序列
+	//   - retry.Delay(baseBackoff) + retry.Multiplier(2) + 显式指数策略：指数退避序列
 	//     baseBackoff*2^(n-1)（500ms、1s、2s…），与旧 baseBackoff*(1<<(attempt-1)) 逐项相同。
 	//   - retry.If(isTransient): 仅瞬时错误重试，非瞬时错误立即停止（等价旧 break）。
 	//   - retry.OnRetry: 一次失败且将重试时回调，n 为一基已尝试序号，
@@ -124,6 +124,7 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 		retry.Attempts(maxRetries),
 		retry.Delay(baseBackoff),
 		retry.Multiplier(2),
+		retry.DelayType(retry.ExponentialBackoff),
 		// 旧实现退避无上限，故将 MaxDelay 设为实质无界（toolkit 默认 30s 会截断，
 		// 与旧 baseBackoff*2^(n-1) 不一致）；仅保留 toolkit 内部对 time.Duration 溢出的兜底。
 		retry.MaxDelay(time.Duration(math.MaxInt64)),

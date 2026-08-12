@@ -708,6 +708,7 @@ func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionReq
 		retry.Attempts(maxRetries),
 		retry.Delay(200*time.Millisecond),
 		retry.Multiplier(2),
+		retry.DelayType(retry.ExponentialBackoff),
 		retry.MaxDelay(10*time.Second),
 	)
 	if err == nil {

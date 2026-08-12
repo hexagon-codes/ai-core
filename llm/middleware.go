@@ -123,10 +123,9 @@ func (p *retryProvider) retryOpts() []retry.Option {
 		retry.Attempts(p.maxRetries + 1), // maxRetries + 1 = total attempts
 		retry.Delay(p.backoff),
 		retry.Multiplier(2),
+		retry.DelayType(retry.ExponentialBackoff),
 		retry.MaxDelay(30 * time.Second),
-		retry.If(func(err error) bool {
-			return isRetryableError(err)
-		}),
+		retry.If(isRetryableError),
 	}
 }
 
