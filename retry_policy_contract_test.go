@@ -68,15 +68,8 @@ func retryOptionGroup(node ast.Node) ([]ast.Expr, bool) {
 	case *ast.CallExpr:
 		return node.Args, true
 	case *ast.CompositeLit:
-		expressions := make([]ast.Expr, 0, len(node.Elts))
-		for _, element := range node.Elts {
-			expression, ok := element.(ast.Expr)
-			if !ok {
-				return nil, false
-			}
-			expressions = append(expressions, expression)
-		}
-		return expressions, true
+		// Elts 静态类型即为 []ast.Expr，直接复用，避免冗余类型断言（S1040）。
+		return node.Elts, true
 	default:
 		return nil, false
 	}
