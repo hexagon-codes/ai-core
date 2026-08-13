@@ -39,7 +39,13 @@
 - `media/video`：`content_moderated` 映射为失败终态，避免审核拦截后 `WaitFor` 长时间继续轮询。
 - `media` Submit 重试策略：计费型任务创建请求未提供 `IdempotencyKey` 时禁用自动重试，避免二义性失败后重复创建任务和重复计费。
 
-## [Unreleased]
+## [0.2.8]
+
+### Added
+- `llm`：新增可选 `ContextTokenCounter` 与 `CountTokensContext` 兼容分派。既有 `Provider` / `TokenCounter` 方法集保持不变；支持新能力的实现可在 Token 计数期间响应取消和截止时间，旧实现继续同步回退。
+
+### Fixed
+- `llm/router`：健康检查的 5 秒 deadline 现在会传入 context-aware Token 计数实现；legacy-only Provider 不再进入不可取消探测，而是保留既有健康状态。Router、官方 Provider、OpenAI-compatible Provider 与内置中间件会保留真实的 context-aware 能力边界。
 
 ## [0.1.11]
 ### Added

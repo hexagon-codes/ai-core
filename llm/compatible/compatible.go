@@ -241,6 +241,11 @@ func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
 	return p.inner.CountTokens(messages)
 }
 
+// CountTokensContext 将可取消的 Token 计数透传给兼容 Provider。
+func (p *Provider) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	return p.inner.CountTokensContext(ctx, messages)
+}
+
 func (p *Provider) Embed(ctx context.Context, texts []string) ([][]float32, error) {
 	return p.inner.Embed(ctx, texts)
 }
@@ -297,5 +302,6 @@ func firstNonEmpty(values ...string) string {
 }
 
 var _ llm.Provider = (*Provider)(nil)
+var _ llm.ContextTokenCounter = (*Provider)(nil)
 var _ llm.EmbeddingProvider = (*Provider)(nil)
 var _ catalog.Provider = (*Provider)(nil)

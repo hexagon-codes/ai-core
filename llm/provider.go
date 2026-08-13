@@ -70,7 +70,8 @@ type Provider interface {
 	// Models 返回可用模型列表
 	Models() []ModelInfo
 
-	// CountTokens 计算消息的 Token 数量
+	// CountTokens 计算消息的 Token 数量。
+	// 该签名为兼容既有实现而保留；可取消计数由可选的 ContextTokenCounter 提供。
 	CountTokens(messages []Message) (int, error)
 }
 

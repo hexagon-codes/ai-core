@@ -75,6 +75,125 @@ func TestChain(t *testing.T) {
 	}
 }
 
+type middlewareContextTokenProvider struct {
+	*mockProvider
+	contextCalls int
+	legacyCalls  int
+	receivedCtx  context.Context
+}
+
+type middlewareContextKey struct{}
+
+func (p *middlewareContextTokenProvider) CountTokens(_ []Message) (int, error) {
+	p.legacyCalls++
+	return 11, nil
+}
+
+func (p *middlewareContextTokenProvider) CountTokensContext(
+	ctx context.Context,
+	_ []Message,
+) (int, error) {
+	p.contextCalls++
+	p.receivedCtx = ctx
+	return 23, nil
+}
+
+// TestBuiltInMiddlewares_PreserveContextTokenCounting 验证标准装饰器不遮蔽可选能力。
+func TestBuiltInMiddlewares_PreserveContextTokenCounting(t *testing.T) {
+	middlewares := map[string]Middleware{
+		"retry":      WithRetry(0, 0),
+		"rate limit": WithRateLimit(10),
+		"timeout":    WithTimeout(time.Hour),
+		"callback":   WithCallback(&CallbackFunc{}),
+		"cache": WithCache(
+			&inMemoryTestCache{data: make(map[string]*CompletionResponse)},
+			nil,
+		),
+	}
+
+	for name, middleware := range middlewares {
+		t.Run(name, func(t *testing.T) {
+			inner := &middlewareContextTokenProvider{
+				mockProvider: &mockProvider{name: name},
+			}
+			wrapped := middleware(inner)
+			counter, ok := wrapped.(ContextTokenCounter)
+			if !ok {
+				t.Fatalf("%T does not preserve ContextTokenCounter", wrapped)
+			}
+			ctx := context.WithValue(context.Background(), middlewareContextKey{}, name)
+
+			got, err := counter.CountTokensContext(ctx, nil)
+			if err != nil || got != 23 {
+				t.Fatalf("CountTokensContext() = (%d, %v), want (23, nil)", got, err)
+			}
+			if inner.contextCalls != 1 || inner.receivedCtx.Value(middlewareContextKey{}) != name {
+				t.Fatalf("context calls = %d, context value = %v, want one call preserving %q", inner.contextCalls, inner.receivedCtx.Value(middlewareContextKey{}), name)
+			}
+			if inner.legacyCalls != 0 {
+				t.Fatalf("legacy CountTokens calls = %d, want 0", inner.legacyCalls)
+			}
+		})
+	}
+}
+
+type deadlineInspectingTokenProvider struct {
+	*mockProvider
+}
+
+func (p *deadlineInspectingTokenProvider) CountTokensContext(
+	ctx context.Context,
+	_ []Message,
+) (int, error) {
+	if _, ok := ctx.Deadline(); !ok {
+		return 0, errors.New("token counting context has no deadline")
+	}
+	return 0, ctx.Err()
+}
+
+// TestTimeoutMiddleware_CountTokensContextAppliesDeadline
+// 验证超时装饰器对新增的可取消计数入口沿用相同超时语义。
+func TestTimeoutMiddleware_CountTokensContextAppliesDeadline(t *testing.T) {
+	inner := &deadlineInspectingTokenProvider{mockProvider: &mockProvider{name: "deadline"}}
+	wrapped := WithTimeout(0)(inner)
+	counter, ok := wrapped.(ContextTokenCounter)
+	if !ok {
+		t.Fatalf("%T does not preserve ContextTokenCounter", wrapped)
+	}
+
+	got, err := counter.CountTokensContext(context.Background(), nil)
+	if got != 0 || !errors.Is(err, context.DeadlineExceeded) {
+		t.Fatalf("CountTokensContext() = (%d, %v), want (0, context.DeadlineExceeded)", got, err)
+	}
+}
+
+// TestBuiltInMiddlewares_DoNotAdvertiseContextTokenCountingForLegacyProvider
+// 验证装饰器不会把旧 Provider 伪装为支持调用中取消的新实现。
+func TestBuiltInMiddlewares_DoNotAdvertiseContextTokenCountingForLegacyProvider(t *testing.T) {
+	middlewares := map[string]Middleware{
+		"retry":      WithRetry(0, 0),
+		"rate limit": WithRateLimit(10),
+		"timeout":    WithTimeout(time.Hour),
+		"callback":   WithCallback(&CallbackFunc{}),
+		"cache": WithCache(
+			&inMemoryTestCache{data: make(map[string]*CompletionResponse)},
+			nil,
+		),
+	}
+
+	for name, middleware := range middlewares {
+		t.Run(name, func(t *testing.T) {
+			wrapped := middleware(&mockProvider{name: name})
+			if _, ok := wrapped.(ContextTokenCounter); ok {
+				t.Fatalf("%T advertises ContextTokenCounter for a legacy-only provider", wrapped)
+			}
+		})
+	}
+}
+
+var _ ContextTokenCounter = (*middlewareContextTokenProvider)(nil)
+var _ ContextTokenCounter = (*deadlineInspectingTokenProvider)(nil)
+
 type orderTrackingProvider struct {
 	next  Provider
 	name  string

@@ -15,13 +15,14 @@ Go 语言的 AI 基础能力库，为 [Hexagon](https://github.com/hexagon-codes
 - **能力矩阵** - `catalog` 统一登记 Provider / Model / Modality / Feature，支持上层做模型选择、运营展示和 conformance 校验
 - **生产级上游传输层** - `transport` 统一 HTTP client、超时、错误诊断、Header 安全、错误体截断、RequestID / Retry-After 提取和 SSRF/network policy
 - **智能路由** - 多 Provider 路由器，支持轮询、加权、最低延迟、降级等策略；任务感知智能路由
+- **可取消 Token 计数** - 可选 `ContextTokenCounter` 支持取消和截止时间，兼容 helper 保留旧 Provider
 - **用量追踪** - Token 消耗统计和成本估算（原子累加器，裁剪后数值一致），支持请求追踪器
 - **结构化输出** - ResponseFormat 支持 JSON 模式和 JSON Schema 约束（含 JSON Schema 2020-12 方言）
 
 ## 安装
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.1.4
+go get github.com/hexagon-codes/ai-core@v0.2.8
 ```
 
 ## 快速开始
@@ -149,6 +150,14 @@ r := router.NewBuilder().
 // 使用路由器（自动选择最优 Provider）
 resp, _ := r.Complete(ctx, req)
 ```
+
+需要让 Token 计数响应取消或截止时间时，使用兼容入口：
+
+```go
+tokens, err := llm.CountTokensContext(ctx, r, req.Messages)
+```
+
+该入口优先调用可选的 `llm.ContextTokenCounter`。旧 Provider 无需修改即可继续使用，但旧同步计数一旦开始便无法被 helper 强制取消；路由健康检查会跳过这类 legacy-only Provider，并保留其既有健康状态。
 
 ### OpenAI-compatible Provider
 

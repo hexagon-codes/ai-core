@@ -214,28 +214,53 @@ func TestHealthChecker_UsesTickerCtxAfterStop(t *testing.T) {
 }
 
 // ============================================================================
-// BUG-8: HealthChecker.checkProvider 不使用 ctx 参数调用 CountTokens
+// BUG-8: HealthChecker.checkProvider 必须把 ctx 传给可取消的 Token 计数实现
 // ============================================================================
 
-func TestHealthChecker_CheckProviderIgnoresContext(t *testing.T) {
-	// checkProvider 创建了 WithTimeout ctx，但 CountTokens 签名不接受 context
-	// func CountTokens(messages []Message) (int, error)
-	// 所以即使 context 超时，CountTokens 也不会被取消
-	// 如果 CountTokens 实现涉及网络调用（如真实的 tokenizer API），无法超时
+func TestHealthChecker_CheckProviderPropagatesTokenCountContext(t *testing.T) {
+	provider := newContextTokenHealthProvider()
+	checker := NewHealthChecker(New(), time.Hour)
+	ctx, cancel := context.WithCancel(context.Background())
 
-	r := New()
-	r.Register("p1", &mockRouterProvider{name: "p1"})
+	result := make(chan bool, 1)
+	go func() {
+		result <- checker.checkProvider(ctx, provider)
+	}()
 
-	checker := NewHealthChecker(r, time.Hour)
-	// checkProvider 内部:
-	// ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	// provider.CountTokens([]llm.Message{{Content: "test"}})
-	// CountTokens 不接受 ctx，所以 timeout 形同虚设
-	_ = checker
+	select {
+	case <-provider.contextEntered:
+		cancel()
+	case healthy := <-result:
+		cancel()
+		t.Fatalf("checkProvider() returned %v before entering context-aware token counting", healthy)
+	case <-time.After(time.Second):
+		cancel()
+		t.Fatal("checkProvider() did not enter context-aware token counting")
+	}
 
-	t.Log("DESIGN ISSUE: Provider.CountTokens 不接受 context.Context 参数，" +
-		"HealthChecker 的 5 秒超时无法生效。如果 provider 的 CountTokens 卡住，" +
-		"健康检查 goroutine 会永久阻塞")
+	select {
+	case healthy := <-result:
+		if healthy {
+			t.Fatal("checkProvider() = true after context cancellation, want false")
+		}
+	case <-time.After(time.Second):
+		t.Fatal("checkProvider() did not return after context cancellation")
+	}
+
+	select {
+	case err := <-provider.contextResult:
+		if err != context.Canceled {
+			t.Fatalf("context-aware token counting error = %v, want context.Canceled", err)
+		}
+	default:
+		t.Fatal("context-aware token counting did not report its context result")
+	}
+
+	select {
+	case <-provider.legacyCalled:
+		t.Fatal("checkProvider() called legacy CountTokens")
+	default:
+	}
 }
 
 // ============================================================================
@@ -302,6 +327,37 @@ type mockRouterProvider struct {
 	completeErr func() error
 }
 
+type contextTokenHealthProvider struct {
+	*mockRouterProvider
+	contextEntered chan struct{}
+	contextResult  chan error
+	legacyCalled   chan struct{}
+}
+
+func newContextTokenHealthProvider() *contextTokenHealthProvider {
+	return &contextTokenHealthProvider{
+		mockRouterProvider: &mockRouterProvider{name: "context-token-health"},
+		contextEntered:     make(chan struct{}),
+		contextResult:      make(chan error, 1),
+		legacyCalled:       make(chan struct{}, 1),
+	}
+}
+
+func (p *contextTokenHealthProvider) CountTokens(_ []llm.Message) (int, error) {
+	p.legacyCalled <- struct{}{}
+	return 1, nil
+}
+
+func (p *contextTokenHealthProvider) CountTokensContext(
+	ctx context.Context,
+	_ []llm.Message,
+) (int, error) {
+	close(p.contextEntered)
+	<-ctx.Done()
+	p.contextResult <- ctx.Err()
+	return 0, ctx.Err()
+}
+
 func (m *mockRouterProvider) Name() string { return m.name }
 func (m *mockRouterProvider) Models() []llm.ModelInfo {
 	if m.models != nil {
@@ -321,3 +377,4 @@ func (m *mockRouterProvider) Stream(ctx context.Context, req llm.CompletionReque
 }
 
 var _ llm.Provider = (*mockRouterProvider)(nil)
+var _ llm.Provider = (*contextTokenHealthProvider)(nil)

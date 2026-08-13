@@ -240,10 +240,25 @@ func (p *Provider) Models() []llm.ModelInfo {
 
 // CountTokens 计算消息的 Token 数量（简化实现）
 func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
+	return p.countTokens(context.Background(), messages)
+}
+
+// CountTokensContext 计算消息的 Token 数量，并在遍历消息时响应 context 取消。
+func (p *Provider) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	return p.countTokens(ctx, messages)
+}
+
+func (p *Provider) countTokens(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	// 简化估算：中文约 1.5 字符一个 token，英文约 4 字符一个 token
 	// 这里使用保守估计
 	var total int
 	for _, msg := range messages {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		// 假设混合语言，使用 2.5 字符每 token
 		total += len(msg.Content) * 2 / 5
 	}

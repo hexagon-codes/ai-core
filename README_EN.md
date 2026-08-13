@@ -15,13 +15,14 @@ A Go library providing core AI capabilities for the [Hexagon](https://github.com
 - **Capability Catalog** — `catalog` registers Provider / Model / Modality / Feature rows for model selection, operational display, and conformance checks
 - **Production Upstream Transport** — `transport` centralizes HTTP clients, timeouts, diagnostics, safe headers, bounded error bodies, RequestID / Retry-After extraction, and SSRF/network policy
 - **Smart Routing** — Multi-provider router with round-robin, weighted, least-latency, fallback strategies; task-aware intelligent routing
+- **Cancelable Token Counting** — Optional `ContextTokenCounter` supports cancellation and deadlines while the compatibility helper preserves legacy providers
 - **Usage Tracking** — Token consumption statistics and cost estimation (atomic cumulative counter, consistent after pruning) with request tracing
 - **Structured Output** — ResponseFormat supporting JSON mode and JSON Schema constraints (including the JSON Schema 2020-12 dialect)
 
 ## Installation
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.1.4
+go get github.com/hexagon-codes/ai-core@v0.2.8
 ```
 
 ## Quick Start
@@ -149,6 +150,14 @@ r := router.NewBuilder().
 // Use router (automatically selects optimal provider)
 resp, _ := r.Complete(ctx, req)
 ```
+
+Use the compatibility entry point when token counting must observe cancellation or a deadline:
+
+```go
+tokens, err := llm.CountTokensContext(ctx, r, req.Messages)
+```
+
+This entry point prefers the optional `llm.ContextTokenCounter`. Existing providers remain source-compatible, but the helper cannot forcibly cancel a legacy synchronous call after it starts. Router health checks skip legacy-only providers and preserve their current health state.
 
 ### OpenAI-Compatible Providers
 

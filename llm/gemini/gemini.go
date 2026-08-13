@@ -194,10 +194,25 @@ func (p *Provider) Models() []llm.ModelInfo {
 // 使用 tokenizer 的 Gemini 计数器进行混合策略估算，相比旧的 len/4 整数除法
 // 不会把短内容截断为 0，并且会计入多模态文本与工具调用参数（W3-54）。
 func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
+	return p.countTokens(context.Background(), messages)
+}
+
+// CountTokensContext 计算消息的 Token 数量，并在遍历消息时响应 context 取消。
+func (p *Provider) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	return p.countTokens(ctx, messages)
+}
+
+func (p *Provider) countTokens(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	counter := tokenizer.New(tokenizer.Gemini)
 
 	var total int
 	for _, msg := range messages {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		// 纯文本内容
 		total += counter.Count(msg.Content)
 

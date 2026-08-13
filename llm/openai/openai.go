@@ -223,9 +223,24 @@ func (p *Provider) Models() []llm.ModelInfo {
 
 // CountTokens 计算消息的 Token 数量（简化实现）
 func (p *Provider) CountTokens(messages []llm.Message) (int, error) {
+	return p.countTokens(context.Background(), messages)
+}
+
+// CountTokensContext 计算消息的 Token 数量，并在遍历消息时响应 context 取消。
+func (p *Provider) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	return p.countTokens(ctx, messages)
+}
+
+func (p *Provider) countTokens(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
 	// 简化估算：约 4 个字符一个 token
 	var total int
 	for _, msg := range messages {
+		if err := ctx.Err(); err != nil {
+			return 0, err
+		}
 		total += len(msg.Content) / 4
 	}
 	return total, nil

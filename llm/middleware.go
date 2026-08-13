@@ -83,6 +83,39 @@ func Chain(provider Provider, middlewares ...Middleware) Provider {
 	return provider
 }
 
+// contextTokenCounterProvider 仅在内层真实支持可取消计数时保留该能力。
+type contextTokenCounterProvider struct {
+	Provider
+	countTokensContext func(context.Context, []Message) (int, error)
+}
+
+func (p *contextTokenCounterProvider) CountTokensContext(
+	ctx context.Context,
+	messages []Message,
+) (int, error) {
+	return p.countTokensContext(ctx, messages)
+}
+
+// preserveContextTokenCounter 避免透明装饰器遮蔽内层的可选能力。
+// legacy-only Provider 仍只暴露旧接口，不会被伪装成可在调用中取消。
+func preserveContextTokenCounter(provider, inner Provider) Provider {
+	counter, ok := inner.(ContextTokenCounter)
+	if !ok {
+		return provider
+	}
+	return bindContextTokenCounter(provider, counter.CountTokensContext)
+}
+
+func bindContextTokenCounter(
+	provider Provider,
+	countTokensContext func(context.Context, []Message) (int, error),
+) Provider {
+	return &contextTokenCounterProvider{
+		Provider:           provider,
+		countTokensContext: countTokensContext,
+	}
+}
+
 // ============== 重试中间件 ==============
 
 // WithRetry 创建重试中间件
@@ -96,11 +129,12 @@ func Chain(provider Provider, middlewares ...Middleware) Provider {
 //   - backoff: 初始退避时间
 func WithRetry(maxRetries int, backoff time.Duration) Middleware {
 	return func(next Provider) Provider {
-		return &retryProvider{
+		provider := &retryProvider{
 			inner:      next,
 			maxRetries: maxRetries,
 			backoff:    backoff,
 		}
+		return preserveContextTokenCounter(provider, next)
 	}
 }
 
@@ -166,12 +200,13 @@ func (p *retryProvider) Stream(ctx context.Context, req CompletionRequest) (*str
 //   - rps: 每秒允许的最大请求数
 func WithRateLimit(rps float64) Middleware {
 	return func(next Provider) Provider {
-		return &rateLimitProvider{
+		provider := &rateLimitProvider{
 			inner:    next,
 			rps:      rps,
 			tokens:   rps,
 			lastTime: time.Now(),
 		}
+		return preserveContextTokenCounter(provider, next)
 	}
 }
 
@@ -246,10 +281,22 @@ func (p *rateLimitProvider) Stream(ctx context.Context, req CompletionRequest) (
 //   - timeout: 请求超时时间
 func WithTimeout(timeout time.Duration) Middleware {
 	return func(next Provider) Provider {
-		return &timeoutProvider{
+		provider := &timeoutProvider{
 			inner:   next,
 			timeout: timeout,
 		}
+		counter, ok := next.(ContextTokenCounter)
+		if !ok {
+			return provider
+		}
+		return bindContextTokenCounter(
+			provider,
+			func(ctx context.Context, messages []Message) (int, error) {
+				ctx, cancel := context.WithTimeout(ctx, timeout)
+				defer cancel()
+				return counter.CountTokensContext(ctx, messages)
+			},
+		)
 	}
 }
 
@@ -291,10 +338,11 @@ func (p *timeoutProvider) Stream(ctx context.Context, req CompletionRequest) (*s
 //   - callback: 回调接口实现
 func WithCallback(callback Callback) Middleware {
 	return func(next Provider) Provider {
-		return &callbackProvider{
+		provider := &callbackProvider{
 			inner:    next,
 			callback: callback,
 		}
+		return preserveContextTokenCounter(provider, next)
 	}
 }
 
@@ -401,11 +449,12 @@ type CacheKeyFunc func(req *CompletionRequest) string
 //   - keyFn: 缓存键生成函数（可为 nil，使用默认键生成）
 func WithCache(cache Cache, keyFn CacheKeyFunc) Middleware {
 	return func(next Provider) Provider {
-		return &cacheProvider{
+		provider := &cacheProvider{
 			inner: next,
 			cache: cache,
 			keyFn: keyFn,
 		}
+		return preserveContextTokenCounter(provider, next)
 	}
 }
 

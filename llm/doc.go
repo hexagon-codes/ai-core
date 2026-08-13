@@ -7,6 +7,7 @@
 //
 //   - Provider: LLM 提供者的核心接口，定义了补全、流式响应等方法
 //   - ToolProvider: 支持工具调用的 Provider 扩展接口
+//   - ContextTokenCounter: 支持取消和截止时间的可选 Token 计数扩展接口
 //
 // # 基本用法
 //

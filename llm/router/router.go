@@ -265,6 +265,28 @@ func (r *Router) CountTokens(messages []llm.Message) (int, error) {
 	return provider.CountTokens(messages)
 }
 
+// CountTokensContext 使用第一个 Provider 的可取消能力计算 Token 数量。
+// 若底层仅支持旧接口，则快速返回 ErrContextTokenCountingUnsupported，不执行阻塞式降级。
+func (r *Router) CountTokensContext(ctx context.Context, messages []llm.Message) (int, error) {
+	if err := ctx.Err(); err != nil {
+		return 0, err
+	}
+
+	r.mu.RLock()
+	if len(r.providerList) == 0 {
+		r.mu.RUnlock()
+		return 0, errors.New("no providers registered")
+	}
+	provider := r.providers[r.providerList[0]]
+	r.mu.RUnlock()
+
+	counter, ok := provider.(llm.ContextTokenCounter)
+	if !ok {
+		return 0, llm.ErrContextTokenCountingUnsupported
+	}
+	return counter.CountTokensContext(ctx, messages)
+}
+
 // selectProvider 根据策略选择 Provider
 func (r *Router) selectProvider(req llm.CompletionRequest) (llm.Provider, error) {
 	r.mu.RLock()
@@ -498,7 +520,8 @@ type ProviderStats struct {
 	Weight  int           `json:"weight"`
 }
 
-// HealthChecker 健康检查器
+// HealthChecker 健康检查器。
+// 仅探测实现 ContextTokenCounter 的 Provider；旧 Provider 保留既有健康状态。
 type HealthChecker struct {
 	router   *Router
 	interval time.Duration
@@ -552,19 +575,43 @@ func (h *HealthChecker) checkAll(ctx context.Context) {
 	h.router.mu.RUnlock()
 
 	for name, provider := range providers {
-		healthy := h.checkProvider(ctx, provider)
-		h.router.SetHealthy(name, healthy)
+		healthy, checked := h.probeProvider(ctx, provider)
+		if ctx.Err() != nil {
+			return
+		}
+		if checked {
+			h.router.SetHealthy(name, healthy)
+		}
 	}
 }
 
 // checkProvider 检查单个 Provider
 func (h *HealthChecker) checkProvider(ctx context.Context, provider llm.Provider) bool {
+	healthy, _ := h.probeProvider(ctx, provider)
+	return healthy
+}
+
+// probeProvider 执行可取消探测，并区分失败与不支持该能力。
+func (h *HealthChecker) probeProvider(
+	ctx context.Context,
+	provider llm.Provider,
+) (healthy, checked bool) {
+	counter, ok := provider.(llm.ContextTokenCounter)
+	if !ok {
+		// 旧 Provider 没有可取消能力，保留既有健康状态。
+		// 使用 goroutine 包装旧 CountTokens 无法停止底层调用，反而会泄漏。
+		return false, false
+	}
+
 	ctx, cancel := context.WithTimeout(ctx, 5*time.Second)
 	defer cancel()
 
-	// 简单的健康检查：尝试计算 token
-	_, err := provider.CountTokens([]llm.Message{{Content: "test"}})
-	return err == nil
+	// 使用可取消能力探测，确保截止时间能传入实际计数实现。
+	_, err := counter.CountTokensContext(ctx, []llm.Message{{Content: "test"}})
+	if errors.Is(err, llm.ErrContextTokenCountingUnsupported) {
+		return false, false
+	}
+	return err == nil, true
 }
 
 // ============== 便捷构建器 ==============
@@ -624,7 +671,10 @@ func (b *Builder) Build() *Router {
 }
 
 // 确保实现了 Provider 接口
-var _ llm.Provider = (*Router)(nil)
+var (
+	_ llm.Provider            = (*Router)(nil)
+	_ llm.ContextTokenCounter = (*Router)(nil)
+)
 
 // CreateDefaultRouter 创建包含常用 Provider 的默认路由器
 func CreateDefaultRouter(providers map[string]llm.Provider) *Router {
