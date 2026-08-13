@@ -2,7 +2,7 @@
 
 [English](README_EN.md) | 中文
 
-Go 语言的 AI 基础能力库，为 [Hexagon](https://github.com/hexagon-codes/hexagon) AI Agent 框架提供核心支持。
+面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库，提供统一的模型、工具、记忆、流式与媒体抽象。
 
 ## 特性
 
@@ -357,11 +357,11 @@ multi := memory.NewMultiLayerMemory(
 
 ## 设计原则
 
-- **依赖精简** — 仅依赖生态内的 `toolkit`（通用工具底座）与少量必要库（如语义缓存的 SQLite 驱动），复用 toolkit 不重造轮子
+- **依赖精简** — 仅依赖通用工具库 `toolkit` 与少量必要库（如语义缓存的 SQLite 驱动），复用成熟能力而不重复实现
 - **接口驱动** — Provider、Memory、Tool、VectorStore 等核心类型均为接口，便于测试和扩展
 - **并发安全** — 所有公共类型均通过 `sync.RWMutex` 或 `atomic` 保证线程安全
 - **函数式选项** — 统一使用 `With*()` 选项模式配置组件
-- **底座边界清晰** — ai-core 只负责模型适配、任务抽象、流式、工具、计量、能力矩阵和 Provider conformance；账号、钱包、队列、产物落盘、审核流程和运营配置由 hexclaw / hexeye-server 上层实现
+- **公共库边界清晰** — ai-core 只负责模型适配、任务抽象、流式、工具、计量、能力矩阵和 Provider conformance；账号、队列、产物落盘、审核流程与运营配置由调用方或上层框架实现
 - **外部调用不持锁** — 调用 LLM/Embedder 等外部服务前释放锁，避免阻塞
 
 ## 许可证

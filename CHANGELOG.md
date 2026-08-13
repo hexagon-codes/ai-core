@@ -2,6 +2,23 @@
 
 本文件记录 ai-core 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
+## [Unreleased]
+
+### Changed
+- CI 按公共 Go 开源库边界收敛为单一工作流，只验证本库可控的不变量；移除对 toolkit、hexagon、hexclaw 浮动默认分支的反向强绑定，下游项目改由消费方在依赖升级时验证。
+- 最低 Go 与当前稳定 Go 分层测试，race 只运行一次；新增 `gofmt`、`go mod tidy -diff`，移除重复 build、无人消费的 coverage 产物与 tag 重复运行。
+- lint 改用 PR / push 的精确 Git 基线，不再假设 `HEAD~1`；漏洞扫描删除日志字符串豁免并恢复失败关闭。
+- API 兼容检查并入统一 CI，动态选择目标分支上最新正式 SemVer tag，并以 `apidiff` 只比较公开 API；不再吞掉工具错误或受版本建议时序影响。
+- GitHub Actions 升级为原生 Node 24 的版本并继续固定完整 commit SHA；checkout 不持久化凭据，工作流启用并发取消，所有 job 增加超时。
+
+## [0.2.8]
+
+### Added
+- `llm`：新增可选 `ContextTokenCounter` 与 `CountTokensContext` 兼容分派。既有 `Provider` / `TokenCounter` 方法集保持不变；支持新能力的实现可在 Token 计数期间响应取消和截止时间，旧实现继续同步回退。
+
+### Fixed
+- `llm/router`：健康检查的 5 秒 deadline 现在会传入 context-aware Token 计数实现；legacy-only Provider 不再进入不可取消探测，而是保留既有健康状态。Router、官方 Provider、OpenAI-compatible Provider 与内置中间件会保留真实的 context-aware 能力边界。
+
 ## [0.2.7]
 ### Added
 - `store/vector/qdrant`：新增 `MaxResponseBytes`、`WithMaxResponseBytes`、类型化配置/HTTP/文档/检索错误，以及显式的 `PointIDStrategy` 迁移开关。
@@ -18,7 +35,7 @@
 ### Changed
 - **BREAKING（Qdrant 持久数据）**：Qdrant 新集合的默认 point ID 从易碰撞的 31 倍 `uint64` 哈希改为 SHA-256 派生 UUIDv8。已有集合升级前应完成重建；迁移窗口可显式使用已弃用的 `PointIDLegacyHash31` 读取旧映射，但不得继续用于新数据。
 - `store/vector/qdrant`：构造阶段严格校验 host/port/collection/dimension/distance/timeout；写入与删除固定 `wait=true`，只有集合查询明确返回 404 时才自动创建，`Clear` 不再吞掉删除失败；批配置非法时在启动 goroutine 前失败关闭。
-- CI：第三方 GitHub Actions 全部固定到不可变 commit SHA，`gorelease`/`govulncheck` 固定工具版本，并在 release tag 构建时校验 `VERSION` 与 tag 一致。
+- CI：第三方 GitHub Actions 全部固定到不可变 commit SHA，`gorelease` / `govulncheck` 固定工具版本。
 - `llm/openai`：仅当请求以 `ReasoningPolicyScopeStructuredVisionRecognition` 显式声明结构化视觉识别作用域时，OpenAI 推理模型才会把 `thinking` 元数据推断为标准 `reasoning_effort`（`on` → `high`，`off` → 模型支持的最低强度；GPT-5.1+ 为 `none`、GPT-5 为 `minimal`、o1/o3/o4 与 `codex-*` 为 `low`）；零值作用域保持既有 wire 不变，显式 `reasoning_effort` 仍独立透传且优先，非推理模型不做推断，私有或 loopback compatible 网关也不会丢失该参数，并继续与厂商方言 `enable_thinking` 隔离。
 - 多数 LLM 与媒体 Provider 迁移到共享 `transport`，补齐可配置 HTTP client、额外安全 Header、请求超时、流式 idle timeout、network policy 和结构化错误诊断。
 - `llm` 中间件重试逻辑识别结构化 `ProviderError`：408/409/429/5xx 可重试，400/401/402/403/404/422 与 network policy 错误不重试。
@@ -38,14 +55,6 @@
 - `streamx.Stream.Close`：先关闭底层 reader 再等待后台 goroutine，避免 processLoop 阻塞在读输入时 `Close()` 卡住；`Collect()` 在 chunk channel 关闭后补读一次错误通道，避免漏报末尾错误。
 - `media/video`：`content_moderated` 映射为失败终态，避免审核拦截后 `WaitFor` 长时间继续轮询。
 - `media` Submit 重试策略：计费型任务创建请求未提供 `IdempotencyKey` 时禁用自动重试，避免二义性失败后重复创建任务和重复计费。
-
-## [0.2.8]
-
-### Added
-- `llm`：新增可选 `ContextTokenCounter` 与 `CountTokensContext` 兼容分派。既有 `Provider` / `TokenCounter` 方法集保持不变；支持新能力的实现可在 Token 计数期间响应取消和截止时间，旧实现继续同步回退。
-
-### Fixed
-- `llm/router`：健康检查的 5 秒 deadline 现在会传入 context-aware Token 计数实现；legacy-only Provider 不再进入不可取消探测，而是保留既有健康状态。Router、官方 Provider、OpenAI-compatible Provider 与内置中间件会保留真实的 context-aware 能力边界。
 
 ## [0.1.11]
 ### Added

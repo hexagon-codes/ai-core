@@ -2,7 +2,7 @@
 
 [中文](README.md) | English
 
-A Go library providing core AI capabilities for the [Hexagon](https://github.com/hexagon-codes/hexagon) AI Agent framework.
+An open-source AI foundation library for any Go application or agent framework, with unified model, tool, memory, streaming, and media abstractions.
 
 ## Features
 
@@ -359,11 +359,11 @@ multi := memory.NewMultiLayerMemory(
 
 ## Design Principles
 
-- **Minimal Dependencies** — Depends only on the in-ecosystem `toolkit` (shared utility foundation) plus a few necessary libraries (such as the SQLite driver for the semantic cache); reuses toolkit instead of reinventing wheels
+- **Minimal Dependencies** — Depends only on the general-purpose `toolkit` library plus a few necessary libraries (such as the SQLite driver for the semantic cache); reuses mature capabilities instead of reinventing them
 - **Interface-Driven** — Provider, Memory, Tool, VectorStore and other core types are interfaces for easy testing and extension
 - **Concurrency-Safe** — All public types are thread-safe via `sync.RWMutex` or `atomic`
 - **Functional Options** — Unified `With*()` option pattern for component configuration
-- **Clear Foundation Boundary** — ai-core owns model adapters, task abstractions, streaming, tools, metering, capability catalog, and provider conformance; accounts, wallets, queues, artifact storage, review workflows, and operational configuration stay in upper layers such as hexclaw / hexeye-server
+- **Clear Public-Library Boundary** — ai-core owns model adapters, task abstractions, streaming, tools, metering, capability catalog, and provider conformance; accounts, queues, artifact storage, review workflows, and operational configuration stay in the consuming application or framework
 - **No Lock During External Calls** — Locks are released before calling LLM/Embedder services to avoid blocking
 
 ## License
