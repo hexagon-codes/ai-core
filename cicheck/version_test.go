@@ -29,6 +29,6 @@ func TestVersionFileIsSemverCompliant(t *testing.T) {
 	}
 	fileVersion := strings.TrimSpace(string(versionBytes))
 	if !semverPattern.MatchString(fileVersion) {
-		t.Fatalf("VERSION = %q, want SemVer format like v0.2.6", fileVersion)
+		t.Fatalf("VERSION = %q, want SemVer format vMAJOR.MINOR.PATCH", fileVersion)
 	}
 }
