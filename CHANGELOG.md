@@ -2,7 +2,7 @@
 
 本文件记录 ai-core 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## [0.2.7]
 ### Added
 - `store/vector/qdrant`：新增 `MaxResponseBytes`、`WithMaxResponseBytes`、类型化配置/HTTP/文档/检索错误，以及显式的 `PointIDStrategy` 迁移开关。
 - `schema`：`Schema` 新增 `anyOf`、`oneOf`、`allOf`、`not` 组合关键字；仅由组合关键字构成的 Schema 会省略空 `type`，并在 JSON 序列化时保留各分支约束。
@@ -30,6 +30,7 @@
 - 依赖：`github.com/hexagon-codes/toolkit` v0.2.3 → v0.2.6；`go` 指令随 toolkit 要求提升至 1.25.7。
 - 依赖：`github.com/hexagon-codes/toolkit` v0.2.6 → v0.3.4；`go` 指令随 toolkit 要求提升至 1.25.12。
 - `llm/middleware`、`llm/router`、`gateway/llmcall`：适配 toolkit v0.3.x 的 `util/retry` 重构——重试条件入口统一为 `If`，指数退避显式选择 `retry.DelayType(retry.ExponentialBackoff)` 搭配 `Multiplier`，重试耗尽错误固定同时包装 `ErrMaxAttemptsReached` 与最终业务错误；新增契约测试钉死"倍数参数必须显式声明指数策略"。
+- CI 门禁精简：`VERSION` 校验改为只检查 SemVer 格式（不再与 git tag 精确绑定，避免已推送 tag 无法修复的死锁）；删除断言 workflow 文件内容的元层次合同测试；移除 codecov 上传（tokenless 上传已被 GitHub 拒绝）。
 
 ### Fixed
 - `streamx`：处理 `io.Reader` 同时返回末帧数据与 `io.EOF` 的合法情况，避免无尾换行 SSE/JSONL 丢失最后一个 token、finish reason 或 tool delta。
@@ -37,6 +38,8 @@
 - `streamx.Stream.Close`：先关闭底层 reader 再等待后台 goroutine，避免 processLoop 阻塞在读输入时 `Close()` 卡住；`Collect()` 在 chunk channel 关闭后补读一次错误通道，避免漏报末尾错误。
 - `media/video`：`content_moderated` 映射为失败终态，避免审核拦截后 `WaitFor` 长时间继续轮询。
 - `media` Submit 重试策略：计费型任务创建请求未提供 `IdempotencyKey` 时禁用自动重试，避免二义性失败后重复创建任务和重复计费。
+
+## [Unreleased]
 
 ## [0.1.11]
 ### Added
