@@ -1,19 +1,23 @@
 // BUG-20260523 ConvertMessages 孤立 tool message 自愈测试
 //
 // 症状：Claude 上游返 400
-//   ***.***.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01MT...
-//   Each `tool_result` block must have a corresponding `tool_use` block in the previous message.
+//
+//	***.***.content.0: unexpected `tool_use_id` found in `tool_result` blocks: toolu_01MT...
+//	Each `tool_result` block must have a corresponding `tool_use` block in the previous message.
 //
 // 根因：任何原因（上游/网关/中间层/历史持久化）导致 messages 序列里出现
-//      "孤立 tool message"（其 ToolCallID 在前面最近的 assistant.ToolCalls 找不到）
-//      上游 Claude 立即 400。
+//
+//	"孤立 tool message"（其 ToolCallID 在前面最近的 assistant.ToolCalls 找不到）
+//	上游 Claude 立即 400。
 //
 // 修法：ConvertMessages 入口先 SanitizeToolCallSequence —— 剥离所有孤立
-//      tool message，确保发出去的序列契约级合规。
+//
+//	tool message，确保发出去的序列契约级合规。
 //
 // 自愈契约：
-//   每个 RoleTool message 的 ToolCallID 必须能在**前面任意位置**（直到上一条
-//   user message 之前）的 RoleAssistant.ToolCalls 中找到匹配 ID。找不到 → 丢弃。
+//
+//	每个 RoleTool message 的 ToolCallID 必须能在**前面任意位置**（直到上一条
+//	user message 之前）的 RoleAssistant.ToolCalls 中找到匹配 ID。找不到 → 丢弃。
 package openai
 
 import (
@@ -73,8 +77,8 @@ func TestBUG20260523_PartialOrphanInMultiToolCall(t *testing.T) {
 				{ID: "toolu_B", Name: "tb", Arguments: "{}"},
 			},
 		},
-		{Role: llm.RoleTool, Content: "rA", ToolCallID: "toolu_A"},          // 合法
-		{Role: llm.RoleTool, Content: "rC", ToolCallID: "toolu_C_orphan"},   // 孤立
+		{Role: llm.RoleTool, Content: "rA", ToolCallID: "toolu_A"},        // 合法
+		{Role: llm.RoleTool, Content: "rC", ToolCallID: "toolu_C_orphan"}, // 孤立
 	}
 	out := ConvertMessages(msgs)
 
@@ -128,8 +132,8 @@ func TestBUG20260523_HistoryReplayedOrphanIsDroppedNotAssistant(t *testing.T) {
 		{Role: llm.RoleSystem, Content: "sys"},
 		{Role: llm.RoleUser, Content: "hi"},
 		{
-			Role:    llm.RoleAssistant,
-			Content: "",
+			Role:      llm.RoleAssistant,
+			Content:   "",
 			ToolCalls: []llm.ToolCallRef{{ID: "toolu_X", Name: "tx", Arguments: "{}"}},
 		},
 		// 漏 tool_X 结果，直接 user 问下一句 —— assistant 自己仍是合法保留对象

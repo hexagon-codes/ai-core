@@ -1,11 +1,15 @@
 // Package stream 提供 Hexagon 框架的增强流处理能力
 //
 // 本文件实现流式 JSON 解析功能：
+//
 //   - ParseJSON[T]: 流式解析 JSON，支持增量解析
+//
 //   - ParseJSONArray[T]: 流式解析 JSON 数组
+//
 //   - JSONStreamParser: 增量 JSON 解析器
 //
 //   - OpenAI: Structured Output with streaming
+//
 //   - Jackson (Java): Streaming JSON API
 package streamx
 

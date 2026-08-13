@@ -1,17 +1,20 @@
 // BUG-20260523-v4 assistant + tool_calls 共存时 content 强制 null
 //
 // 症状：用户截图错误 `unexpected tool_use_id found in tool_result blocks: toolu_011d...`
-//      上游网关端实际收到的 assistant message 是：
-//        {role:"assistant", content:[{type:"text",text:"我来帮你..."}], stopReason:"tool_calls"}
-//      ← content 数组只有 text，tool_use 块**丢了**。
+//
+//	上游网关端实际收到的 assistant message 是：
+//	  {role:"assistant", content:[{type:"text",text:"我来帮你..."}], stopReason:"tool_calls"}
+//	← content 数组只有 text，tool_use 块**丢了**。
 //
 // 根因：部分 OpenAI 兼容网关（new-api / one-api 同源）翻 OpenAI → Anthropic 时，
-//      assistant.content="text" + tool_calls=[...] 共存场景下，**只翻 text 丢 tool_use**。
-//      下一条 tool_result 找不到对应 tool_use 立即 400。
+//
+//	assistant.content="text" + tool_calls=[...] 共存场景下，**只翻 text 丢 tool_use**。
+//	下一条 tool_result 找不到对应 tool_use 立即 400。
 //
 // 修法：assistant + ToolCalls 共存时，content 强制设为 nil（不再仅 "" 时 nil）。
-//      OpenAI 规范本身允许此形态；网关接到 content=null 翻译路径单一，不易踩 bug。
-//      trade-off：丢失 LLM 输出的 reasoning text，但下一轮 LLM 仍能从 tool_calls 推断意图。
+//
+//	OpenAI 规范本身允许此形态；网关接到 content=null 翻译路径单一，不易踩 bug。
+//	trade-off：丢失 LLM 输出的 reasoning text，但下一轮 LLM 仍能从 tool_calls 推断意图。
 package openai
 
 import (

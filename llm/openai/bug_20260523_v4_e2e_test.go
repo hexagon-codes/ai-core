@@ -5,9 +5,12 @@
 // "我来帮你创建这个定时任务。先了解一下当前的工作目录结构。" 构造端到端复现。
 //
 // 修前：上游网关收到 {"role":"assistant","content":"我来帮你...","tool_calls":[{...}]}
-//      翻 Anthropic 时只翻 text 丢 tool_use → 400。
+//
+//	翻 Anthropic 时只翻 text 丢 tool_use → 400。
+//
 // 修后：上游网关收到 {"role":"assistant","content":null,"tool_calls":[{...}]}
-//      翻译路径单一，不再丢 tool_use → 不再 400。
+//
+//	翻译路径单一，不再丢 tool_use → 不再 400。
 package openai
 
 import (

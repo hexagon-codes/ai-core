@@ -9,10 +9,10 @@ import (
 
 func TestTaskState_Terminal(t *testing.T) {
 	cases := map[TaskState]bool{
-		TaskQueued:    false,
-		TaskRunning:   false,
-		TaskSucceeded: true,
-		TaskFailed:    true,
+		TaskQueued:         false,
+		TaskRunning:        false,
+		TaskSucceeded:      true,
+		TaskFailed:         true,
 		TaskState("other"): false,
 	}
 	for s, want := range cases {

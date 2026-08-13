@@ -111,10 +111,10 @@ type Meter struct {
 	mu         sync.RWMutex       // 保护 records 的读写锁
 
 	// 快速计数器（原子操作，避免锁竞争）
-	totalRequests   atomic.Int64 // 总请求数
-	successRequests atomic.Int64 // 成功请求数
-	inputTokens     atomic.Int64 // 总输入 Token
-	outputTokens    atomic.Int64 // 总输出 Token
+	totalRequests   atomic.Int64  // 总请求数
+	successRequests atomic.Int64  // 成功请求数
+	inputTokens     atomic.Int64  // 总输入 Token
+	outputTokens    atomic.Int64  // 总输出 Token
 	totalLatency    atomic.Int64  // 总延迟（纳秒）
 	latencyCount    atomic.Int64  // 有延迟记录的请求数（用于计算平均值）
 	totalCost       atomic.Uint64 // 累计成本（美元，按 float64 bits 存储，避免微美元取整丢失低额成本）

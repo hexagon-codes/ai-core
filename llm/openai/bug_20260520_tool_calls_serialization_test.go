@@ -1,14 +1,17 @@
 // Package openai 回归测试：BUG-20260520
 //
 // 症状：用户多轮对话触发"runtime stream 失败: llm complete: openai api error: 400 Bad Request,
-//      body: ... Invalid JSON: Input should be a valid string or an array of content blocks ..."
+//
+//	body: ... Invalid JSON: Input should be a valid string or an array of content blocks ..."
 //
 // 根因：convertMessages 序列化历史消息时漏写两个字段——
-//   1. assistant 消息上的 msg.ToolCalls   → 上一轮工具调用历史丢失
-//   2. role=tool  消息上的 msg.ToolCallID → 工具结果失去与调用的关联
 //
-//   下游 OpenAI 兼容网关（new-api / one-api 等）把这种残缺的请求翻译成
-//   Anthropic / Claude 上游格式时，content 字段被翻成 null → 400。
+//  1. assistant 消息上的 msg.ToolCalls   → 上一轮工具调用历史丢失
+//
+//  2. role=tool  消息上的 msg.ToolCallID → 工具结果失去与调用的关联
+//
+//     下游 OpenAI 兼容网关（new-api / one-api 等）把这种残缺的请求翻译成
+//     Anthropic / Claude 上游格式时，content 字段被翻成 null → 400。
 //
 // 修复点：llm/openai/openai.go::convertMessages
 //

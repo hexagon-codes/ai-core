@@ -17,7 +17,7 @@ type countingProvider struct {
 	calls atomic.Int64
 }
 
-func (p *countingProvider) Name() string           { return p.name }
+func (p *countingProvider) Name() string            { return p.name }
 func (p *countingProvider) Models() []llm.ModelInfo { return []llm.ModelInfo{{ID: p.name + "-model"}} }
 func (p *countingProvider) CountTokens(messages []llm.Message) (int, error) {
 	return 0, nil

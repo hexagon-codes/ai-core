@@ -12,10 +12,10 @@ import (
 
 // mockProv is a minimal llm.Provider for exercising router selection strategies.
 type mockProv struct {
-	name     string
-	models   []llm.ModelInfo
+	name        string
+	models      []llm.ModelInfo
 	completeErr error
-	resp     *llm.CompletionResponse
+	resp        *llm.CompletionResponse
 }
 
 func (m *mockProv) Name() string { return m.name }

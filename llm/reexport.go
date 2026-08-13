@@ -38,10 +38,10 @@ type StreamFormat = streamx.Format
 
 // 流格式常量
 const (
-	StreamOpenAIFormat  StreamFormat = streamx.OpenAIFormat
-	StreamClaudeFormat  StreamFormat = streamx.ClaudeFormat
-	StreamGeminiFormat  StreamFormat = streamx.GeminiFormat
-	StreamCustomFormat  StreamFormat = streamx.CustomFormat
+	StreamOpenAIFormat StreamFormat = streamx.OpenAIFormat
+	StreamClaudeFormat StreamFormat = streamx.ClaudeFormat
+	StreamGeminiFormat StreamFormat = streamx.GeminiFormat
+	StreamCustomFormat StreamFormat = streamx.CustomFormat
 )
 
 // NewStream 创建��处理器

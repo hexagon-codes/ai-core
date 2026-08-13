@@ -91,7 +91,7 @@ func TestModels_Coverage(t *testing.T) {
 func TestCountTokens_Coverage(t *testing.T) {
 	// 中文每字 2 token，英文每字符也按 rune 计 2 token
 	n, err := New("ak", "sk").CountTokens([]llm.Message{
-		{Role: llm.RoleUser, Content: "你好"},  // 2 runes * 2 = 4
+		{Role: llm.RoleUser, Content: "你好"},      // 2 runes * 2 = 4
 		{Role: llm.RoleAssistant, Content: "ab"}, // 2 runes * 2 = 4
 	})
 	if err != nil || n != 8 {
