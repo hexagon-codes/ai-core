@@ -22,7 +22,7 @@ An open-source AI foundation library for any Go application or agent framework, 
 ## Installation
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.2.8
+go get github.com/hexagon-codes/ai-core@v0.2.10
 ```
 
 ## Quick Start

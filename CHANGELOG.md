@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.2.10]
+
 ### Changed
 - CI 按公共 Go 开源库边界收敛为单一工作流，只验证本库可控的不变量；移除对 toolkit、hexagon、hexclaw 浮动默认分支的反向强绑定，下游项目改由消费方在依赖升级时验证。
 - 最低 Go 与当前稳定 Go 分层测试，race 只运行一次；新增 `gofmt`、`go mod tidy -diff`，移除重复 build、无人消费的 coverage 产物与 tag 重复运行。
