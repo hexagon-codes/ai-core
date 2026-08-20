@@ -114,6 +114,8 @@ type Chunk struct {
 	// ReasoningDisclosure records typed provenance and fail-closed visibility.
 	// A nil value is a legacy/absent disclosure and must be read as not_exposed.
 	ReasoningDisclosure *ReasoningDisclosure `json:"reasoning_disclosure,omitempty"`
+	// ReasoningEvidence 仅承载 adapter 内部执行事实，不是产品公共回执。
+	ReasoningEvidence map[string]any `json:"reasoning_evidence,omitempty"`
 	// Role 消息角色，通常为 "assistant"
 	// 一般只在首个块中包含此字段
 	Role string `json:"role,omitempty"`
@@ -199,6 +201,8 @@ type Result struct {
 	ToolCalls []ToolCall `json:"tool_calls,omitempty"`
 	// Usage Token 使用统计（如果 API 返回）
 	Usage Usage `json:"usage,omitempty"`
+	// ReasoningEvidence 保留流中最后一份内部推理执行事实。
+	ReasoningEvidence map[string]any `json:"reasoning_evidence,omitempty"`
 	// Chunks 保存所有原始块，用于调试或重放
 	Chunks []*Chunk `json:"chunks,omitempty"`
 }
@@ -651,6 +655,9 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			if chunk.FinishReason != "" {
 				s.result.FinishReason = chunk.FinishReason
 			}
+			if chunk.ReasoningEvidence != nil {
+				s.result.ReasoningEvidence = cloneReasoningEvidence(chunk.ReasoningEvidence)
+			}
 			if len(chunk.ToolCalls) > 0 {
 				s.result.ToolCalls = mergeToolCalls(s.result.ToolCalls, chunk.ToolCalls)
 			}
@@ -684,6 +691,17 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			return
 		}
 	}
+}
+
+func cloneReasoningEvidence(source map[string]any) map[string]any {
+	if source == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(source))
+	for key, value := range source {
+		cloned[key] = value
+	}
+	return cloned
 }
 
 func (s *Stream) notifyFirstChunk() {

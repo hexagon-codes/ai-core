@@ -179,7 +179,7 @@ func TestBuildRequestBody_ResponseFormatJSONObject(t *testing.T) {
 	}
 }
 
-func TestBuildRequestBody_SiliconFlowEnableThinkingFromMetadata(t *testing.T) {
+func TestBuildRequestBody_SiliconFlowDoesNotInferEnableThinkingFromHost(t *testing.T) {
 	p := New("k", WithBaseURL("https://api.siliconflow.cn/v1"))
 	body, err := p.buildRequestBody(llm.CompletionRequest{
 		Model:    "Qwen/Qwen3.6-35B-A3B",
@@ -193,12 +193,8 @@ func TestBuildRequestBody_SiliconFlowEnableThinkingFromMetadata(t *testing.T) {
 	if err := json.Unmarshal(body, &payload); err != nil {
 		t.Fatal(err)
 	}
-	got, ok := payload["enable_thinking"].(bool)
-	if !ok {
-		t.Fatalf("enable_thinking type = %T, want bool; payload=%v", payload["enable_thinking"], payload)
-	}
-	if got {
-		t.Fatalf("enable_thinking = true, want false")
+	if _, ok := payload["enable_thinking"]; ok {
+		t.Fatalf("base URL and model name must not infer enable_thinking: %v", payload)
 	}
 }
 

@@ -139,6 +139,7 @@ type claudeEvent struct {
 	Delta *struct {
 		Type       string `json:"type,omitempty"`
 		Text       string `json:"text,omitempty"`
+		Thinking   string `json:"thinking,omitempty"`
 		StopReason string `json:"stop_reason,omitempty"`
 		// PartialJSON 是 input_json_delta 增量，拼接后构成工具调用参数 JSON
 		PartialJSON string `json:"partial_json,omitempty"`
@@ -202,6 +203,8 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 					Index:     evt.Index,
 					Arguments: evt.Delta.PartialJSON,
 				}}
+			} else if evt.Delta.Type == "thinking_delta" {
+				chunk.Reasoning = evt.Delta.Thinking
 			} else {
 				chunk.Content = evt.Delta.Text
 			}

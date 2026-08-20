@@ -229,6 +229,9 @@ type CompletionResponse struct {
 
 	// Created 创建时间戳
 	Created int64 `json:"created"`
+
+	// ReasoningReceipt 记录推理控制的发送、接受与可观察执行证据
+	ReasoningReceipt *ReasoningReceipt `json:"reasoning_evidence,omitempty"`
 }
 
 // HasToolCalls 检查响应是否包含工具调用
@@ -258,6 +261,9 @@ type ModelInfo struct {
 
 	// Features 支持的特性列表
 	Features []string `json:"features,omitempty"`
+
+	// ReasoningSupport 表示模型推理能力的精确三态
+	ReasoningSupport ReasoningSupport `json:"reasoning_support,omitempty"`
 }
 
 // HasFeature 检查模型是否支持某个特性

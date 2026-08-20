@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net/http"
 	"os"
@@ -127,6 +128,13 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	if req.Model == "" {
 		req.Model = p.model
 	}
+	reasoningPlan, explicitReasoning, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, p.baseURL)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningPlan.Receipt)
+		}
+		return nil, err
+	}
 
 	body, err := p.buildRequestBody(req, false)
 	if err != nil {
@@ -148,13 +156,30 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	return p.parseResponse(&result), nil
+	parsed := p.parseResponse(&result)
+	if explicitReasoning {
+		receipt := reasoningPlan.Receipt.WithEvidence(
+			true,
+			openAIResponseHasReasoning(&result),
+			result.Usage.CompletionTokensDetails.ReasoningTokens,
+		)
+		parsed.ReasoningReceipt = &receipt
+		llm.PublishReasoningReceipt(req.Metadata, receipt)
+	}
+	return parsed, nil
 }
 
 // Stream 执行流式补全请求
 func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*streamx.Stream, error) {
 	if req.Model == "" {
 		req.Model = p.model
+	}
+	reasoningPlan, explicitReasoning, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, p.baseURL)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningPlan.Receipt)
+		}
+		return nil, err
 	}
 
 	body, err := p.buildRequestBody(req, true)
@@ -167,7 +192,17 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat), nil
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat)
+	if explicitReasoning {
+		receipt := reasoningPlan.Receipt.WithEvidence(true, false, 0)
+		llm.PublishReasoningReceipt(req.Metadata, receipt)
+		stream.SetParser(&openAIReasoningStreamParser{
+			base:     &streamx.OpenAIParser{},
+			metadata: req.Metadata,
+			receipt:  receipt,
+		})
+	}
+	return stream, nil
 }
 
 // Models 返回可用模型列表
@@ -398,19 +433,14 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if req.User != "" {
 		payload["user"] = req.User
 	}
-	if effort, ok := openAIReasoningEffortFromMetadata(
-		req.Metadata,
-		req.Model,
-		req.ReasoningPolicyScope,
-	); ok {
-		// OpenAI reasoning models use reasoning_effort. This is a request
-		// capability, not a host-name capability: OpenAI-compatible gateways
-		// are commonly deployed on loopback/private URLs and must not silently
-		// lose the parameter merely because their domain is unknown.
+	if plan, explicit, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, p.baseURL); err != nil {
+		return nil, err
+	} else if explicit {
+		for field, value := range plan.Wire {
+			payload[field] = value
+		}
+	} else if effort, ok := trustedOpenAIReasoningEffort(req); ok {
 		payload["reasoning_effort"] = effort
-	} else if thinking, ok := openAIEnableThinkingFromMetadata(req.Metadata); ok && supportsEnableThinking(p.baseURL) {
-		// Qwen-compatible vendors use the separate enable_thinking dialect.
-		payload["enable_thinking"] = thinking
 	}
 
 	// ResponseFormat 支持
@@ -439,142 +469,58 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	return json.Marshal(payload)
 }
 
-func openAIEnableThinkingFromMetadata(metadata map[string]any) (bool, bool) {
-	if len(metadata) == 0 {
-		return false, false
-	}
-	for _, key := range []string{"enable_thinking", "thinking", "think"} {
-		value, exists := metadata[key]
-		if !exists {
-			continue
-		}
-		switch v := value.(type) {
-		case bool:
-			return v, true
-		case string:
-			switch strings.ToLower(strings.TrimSpace(v)) {
-			case "on", "true", "1", "yes", "enabled":
-				return true, true
-			case "off", "false", "0", "no", "disabled":
-				return false, true
-			}
-		}
-	}
-	return false, false
-}
-
-func openAIReasoningEffortFromMetadata(
-	metadata map[string]any,
-	model string,
-	scope llm.ReasoningPolicyScope,
-) (string, bool) {
-	if len(metadata) == 0 {
-		return "", false
-	}
-
-	// An explicit standard parameter always wins over the coarse on/off UI
-	// switch. Passing it through also supports compatible providers whose
-	// model names are not known to this package.
+func trustedOpenAIReasoningEffort(req llm.CompletionRequest) (string, bool) {
 	for _, key := range []string{"reasoning_effort", "reasoningEffort"} {
-		raw, exists := metadata[key]
+		raw, exists := req.Metadata[key]
 		if !exists {
 			continue
 		}
-		effort, ok := normalizeOpenAIReasoningEffort(raw)
-		return effort, ok
+		value, ok := raw.(string)
+		if !ok {
+			return "", false
+		}
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "x-high" || value == "x_high" {
+			value = "xhigh"
+		}
+		switch value {
+		case "none", "minimal", "low", "medium", "high", "xhigh", "max":
+			return value, true
+		default:
+			return "", false
+		}
 	}
-
-	if scope != llm.ReasoningPolicyScopeStructuredVisionRecognition {
+	if req.ReasoningPolicyScope != llm.ReasoningPolicyScopeStructuredVisionRecognition ||
+		strings.EqualFold(strings.TrimSpace(req.Model), "gpt-5.6-sol") == false {
 		return "", false
 	}
-	if !supportsOpenAIReasoningEffort(model) {
-		return "", false
-	}
-	enabled, exists := openAIEnableThinkingFromMetadata(metadata)
-	if !exists {
+	enabled, err := reasoningIntent(req.Metadata)
+	if err != nil {
 		return "", false
 	}
 	if enabled {
 		return "high", true
 	}
-	return minimumOpenAIReasoningEffort(model), true
+	return "none", true
 }
 
-func normalizeOpenAIReasoningEffort(raw any) (string, bool) {
-	value, ok := raw.(string)
-	if !ok {
-		return "", false
+func reasoningIntent(metadata map[string]any) (bool, error) {
+	raw, exists := metadata["thinking"]
+	if !exists {
+		return false, fmt.Errorf("reasoning intent is required")
 	}
-	value = strings.ToLower(strings.TrimSpace(value))
-	switch value {
-	case "x-high", "x_high":
-		value = "xhigh"
-	}
-	switch value {
-	case "none", "minimal", "low", "medium", "high", "xhigh", "max":
-		return value, true
-	default:
-		return "", false
-	}
-}
-
-func supportsOpenAIReasoningEffort(model string) bool {
-	model = canonicalOpenAIModelID(model)
-	if strings.HasPrefix(model, "gpt-5") {
-		return true
-	}
-	for _, prefix := range []string{"o1", "o3", "o4"} {
-		if model == prefix || strings.HasPrefix(model, prefix+"-") {
-			return true
+	switch value := raw.(type) {
+	case bool:
+		return value, nil
+	case string:
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "on", "true", "1":
+			return true, nil
+		case "off", "false", "0":
+			return false, nil
 		}
 	}
-	return strings.HasPrefix(model, "codex-")
-}
-
-func minimumOpenAIReasoningEffort(model string) string {
-	model = canonicalOpenAIModelID(model)
-	if minor, ok := gpt5MinorVersion(model); ok && minor >= 1 {
-		return "none"
-	}
-	if strings.HasPrefix(model, "gpt-5") {
-		// Original GPT-5 supports minimal but not none.
-		return "minimal"
-	}
-	// Older o-series/Codex reasoning models cannot fully disable reasoning.
-	return "low"
-}
-
-func canonicalOpenAIModelID(model string) string {
-	model = strings.ToLower(strings.TrimSpace(model))
-	if slash := strings.LastIndex(model, "/"); slash >= 0 {
-		model = model[slash+1:]
-	}
-	return model
-}
-
-func gpt5MinorVersion(model string) (int, bool) {
-	const prefix = "gpt-5."
-	if !strings.HasPrefix(model, prefix) {
-		return 0, false
-	}
-	rest := model[len(prefix):]
-	minor := 0
-	digits := 0
-	for _, r := range rest {
-		if r < '0' || r > '9' {
-			break
-		}
-		minor = minor*10 + int(r-'0')
-		digits++
-	}
-	return minor, digits > 0
-}
-
-func supportsEnableThinking(baseURL string) bool {
-	base := strings.ToLower(baseURL)
-	return strings.Contains(base, "siliconflow") ||
-		strings.Contains(base, "dashscope") ||
-		strings.Contains(base, "aliyuncs")
+	return false, fmt.Errorf("invalid reasoning intent")
 }
 
 // convertMessages 兼容内部老调用点，转发到 ConvertMessages。
@@ -679,9 +625,11 @@ type openAIResponse struct {
 	Choices []struct {
 		Index   int `json:"index"`
 		Message struct {
-			Role      string `json:"role"`
-			Content   string `json:"content"`
-			ToolCalls []struct {
+			Role             string `json:"role"`
+			Content          string `json:"content"`
+			Reasoning        string `json:"reasoning,omitempty"`
+			ReasoningContent string `json:"reasoning_content,omitempty"`
+			ToolCalls        []struct {
 				ID       string `json:"id"`
 				Type     string `json:"type"`
 				Function struct {
@@ -700,7 +648,57 @@ type openAIResponse struct {
 		PromptTokensDetails struct {
 			CachedTokens int `json:"cached_tokens"`
 		} `json:"prompt_tokens_details"`
+		CompletionTokensDetails struct {
+			ReasoningTokens int `json:"reasoning_tokens"`
+		} `json:"completion_tokens_details"`
 	} `json:"usage"`
+}
+
+func openAIResponseHasReasoning(resp *openAIResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for _, choice := range resp.Choices {
+		if choice.Message.Reasoning != "" || choice.Message.ReasoningContent != "" {
+			return true
+		}
+	}
+	return false
+}
+
+type openAIReasoningStreamParser struct {
+	base     *streamx.OpenAIParser
+	metadata map[string]any
+	receipt  llm.ReasoningReceipt
+}
+
+func (p *openAIReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
+	chunk, err := p.base.Parse(data)
+	if err != nil || chunk == nil {
+		return chunk, err
+	}
+	var envelope struct {
+		Usage *struct {
+			CompletionTokensDetails struct {
+				ReasoningTokens int `json:"reasoning_tokens"`
+			} `json:"completion_tokens_details"`
+		} `json:"usage,omitempty"`
+	}
+	_ = json.Unmarshal(data, &envelope)
+	reasoningTokens := 0
+	if envelope.Usage != nil {
+		reasoningTokens = envelope.Usage.CompletionTokensDetails.ReasoningTokens
+	}
+	if chunk.Reasoning != "" || reasoningTokens > 0 {
+		p.receipt = p.receipt.WithEvidence(true, chunk.Reasoning != "", reasoningTokens)
+		llm.PublishReasoningReceipt(p.metadata, p.receipt)
+	}
+	chunk.ReasoningEvidence = llm.ReasoningEvidenceMap(p.receipt)
+	return chunk, nil
+}
+
+func (p *openAIReasoningStreamParser) IsDone(data []byte) bool {
+	return p.base.IsDone(data)
 }
 
 // parseResponse 解析响应
