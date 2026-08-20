@@ -126,6 +126,13 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	if req.Model == "" {
 		req.Model = p.model
 	}
+	_, reasoningReceipt, explicitReasoning, err := anthropicReasoningConfig(req.Metadata)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningReceipt)
+		}
+		return nil, err
+	}
 
 	body, systemPrompt, err := p.buildRequestBody(req, false)
 	if err != nil {
@@ -143,13 +150,26 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	return p.parseResponse(&result, systemPrompt), nil
+	parsed := p.parseResponse(&result, systemPrompt)
+	if explicitReasoning {
+		receipt := reasoningReceipt.WithEvidence(true, anthropicResponseHasReasoning(&result), 0)
+		parsed.ReasoningReceipt = &receipt
+		llm.PublishReasoningReceipt(req.Metadata, receipt)
+	}
+	return parsed, nil
 }
 
 // Stream 执行流式补全请求
 func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*streamx.Stream, error) {
 	if req.Model == "" {
 		req.Model = p.model
+	}
+	_, reasoningReceipt, explicitReasoning, err := anthropicReasoningConfig(req.Metadata)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningReceipt)
+		}
+		return nil, err
 	}
 
 	body, _, err := p.buildRequestBody(req, true)
@@ -162,7 +182,16 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.ClaudeFormat), nil
+	parser := &anthropicReasoningStreamParser{
+		base:     &streamx.ClaudeParser{},
+		close:    resp.Body.Close,
+		metadata: req.Metadata,
+	}
+	if explicitReasoning {
+		parser.receipt = reasoningReceipt.WithEvidence(true, false, 0)
+		llm.PublishReasoningReceipt(req.Metadata, parser.receipt)
+	}
+	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.ClaudeFormat).SetParser(parser), nil
 }
 
 // Models 返回可用模型列表
@@ -318,6 +347,11 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if len(req.Stop) > 0 {
 		payload["stop_sequences"] = req.Stop
 	}
+	if thinking, _, explicit, err := anthropicReasoningConfig(req.Metadata); err != nil {
+		return nil, systemPrompt, err
+	} else if explicit {
+		payload["thinking"] = thinking
+	}
 
 	// 工具支持
 	if len(req.Tools) > 0 {
@@ -461,11 +495,149 @@ type anthropicResponse struct {
 }
 
 type anthropicContent struct {
-	Type  string `json:"type"`
-	Text  string `json:"text,omitempty"`
-	ID    string `json:"id,omitempty"`
-	Name  string `json:"name,omitempty"`
-	Input any    `json:"input,omitempty"`
+	Type     string `json:"type"`
+	Text     string `json:"text,omitempty"`
+	Thinking string `json:"thinking,omitempty"`
+	ID       string `json:"id,omitempty"`
+	Name     string `json:"name,omitempty"`
+	Input    any    `json:"input,omitempty"`
+}
+
+func anthropicReasoningConfig(metadata map[string]any) (map[string]any, llm.ReasoningReceipt, bool, error) {
+	if plan, explicit, err := llm.PlanReasoningFromMetadata(metadata, "", ""); explicit {
+		if err != nil {
+			return nil, plan.Receipt, true, err
+		}
+		thinking, ok := plan.Wire[string(llm.ReasoningDialectThinking)].(map[string]any)
+		if !ok {
+			return nil, plan.Receipt, true, fmt.Errorf("anthropic reasoning control must be an object")
+		}
+		return thinking, plan.Receipt, true, nil
+	}
+	raw, explicit := metadata["reasoning_v1"]
+	if !explicit {
+		return nil, llm.ReasoningReceipt{}, false, nil
+	}
+	values, ok := raw.(map[string]any)
+	if !ok {
+		return nil, llm.ReasoningReceipt{}, true, fmt.Errorf("anthropic reasoning_v1 must be an object")
+	}
+	mode, ok := values["mode"].(string)
+	if !ok {
+		return nil, llm.ReasoningReceipt{}, true, fmt.Errorf("anthropic reasoning mode is required")
+	}
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	if mode != "enabled" && mode != "adaptive" && mode != "disabled" {
+		return nil, llm.ReasoningReceipt{}, true, fmt.Errorf("invalid anthropic reasoning mode %q", mode)
+	}
+
+	thinking := map[string]any{"type": mode}
+	if mode == "enabled" {
+		budget, ok := positiveReasoningBudget(values["budget_tokens"])
+		if !ok {
+			return nil, llm.ReasoningReceipt{}, true, fmt.Errorf("anthropic reasoning budget_tokens must be a positive integer")
+		}
+		thinking["budget_tokens"] = budget
+	}
+	receipt := llm.ReasoningReceipt{
+		Version:     1,
+		Enabled:     mode != "disabled",
+		Support:     llm.ReasoningSupported,
+		Dialect:     llm.ReasoningDialect("anthropic_thinking"),
+		Sent:        true,
+		Application: llm.ReasoningApplicationUnknown,
+	}
+	return thinking, receipt, true, nil
+}
+
+func positiveReasoningBudget(raw any) (int, bool) {
+	switch value := raw.(type) {
+	case int:
+		return value, value > 0
+	case int64:
+		return int(value), value > 0
+	case float64:
+		budget := int(value)
+		return budget, value > 0 && float64(budget) == value
+	case json.Number:
+		budget, err := value.Int64()
+		return int(budget), err == nil && budget > 0
+	default:
+		return 0, false
+	}
+}
+
+func anthropicResponseHasReasoning(resp *anthropicResponse) bool {
+	if resp == nil {
+		return false
+	}
+	for _, content := range resp.Content {
+		if content.Type == "thinking" && content.Thinking != "" {
+			return true
+		}
+	}
+	return false
+}
+
+type anthropicReasoningStreamParser struct {
+	base     *streamx.ClaudeParser
+	close    func() error
+	metadata map[string]any
+	receipt  llm.ReasoningReceipt
+}
+
+func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
+	var envelope struct {
+		Type  string `json:"type"`
+		Delta *struct {
+			Type     string `json:"type"`
+			Thinking string `json:"thinking"`
+		} `json:"delta,omitempty"`
+		Error *struct {
+			Type    string `json:"type"`
+			Message string `json:"message"`
+		} `json:"error,omitempty"`
+	}
+	if err := json.Unmarshal(data, &envelope); err != nil {
+		return nil, err
+	}
+	if envelope.Type == "error" {
+		if p.close != nil {
+			_ = p.close()
+		}
+		if envelope.Error == nil {
+			return nil, fmt.Errorf("anthropic stream error")
+		}
+		return nil, fmt.Errorf("anthropic stream error: %s: %s", envelope.Error.Type, envelope.Error.Message)
+	}
+
+	chunk, err := p.base.Parse(data)
+	if err != nil || chunk == nil {
+		return chunk, err
+	}
+	if envelope.Delta != nil && envelope.Delta.Type == "thinking_delta" {
+		chunk.Content = ""
+		chunk.Reasoning = envelope.Delta.Thinking
+		if p.receipt.Version == 0 {
+			p.receipt = llm.ReasoningReceipt{
+				Version:     1,
+				Enabled:     true,
+				Support:     llm.ReasoningUnknown,
+				Dialect:     llm.ReasoningDialect("anthropic_thinking"),
+				Application: llm.ReasoningApplicationUnknown,
+			}
+		}
+		p.receipt = p.receipt.WithEvidence(true, chunk.Reasoning != "", 0)
+		llm.PublishReasoningReceipt(p.metadata, p.receipt)
+	}
+	if p.receipt.Version != 0 {
+		chunk.ReasoningEvidence = llm.ReasoningEvidenceMap(p.receipt)
+	}
+	return chunk, nil
+}
+
+func (p *anthropicReasoningStreamParser) IsDone(data []byte) bool {
+	return p.base.IsDone(data)
 }
 
 // parseResponse 解析响应

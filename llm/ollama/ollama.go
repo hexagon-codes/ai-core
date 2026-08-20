@@ -111,6 +111,47 @@ func WithNetworkPolicy(policy llm.NetworkPolicy) Option {
 	}
 }
 
+const trustedReasoningDisclosureEvidenceMetadataKey = "ollama_trusted_reasoning_disclosure_evidence_v1"
+
+type trustedReasoningDisclosureEvidence struct {
+	evidence streamx.ReasoningDisclosureEvidence
+}
+
+// InjectTrustedReasoningDisclosureEvidence 将宿主冻结的精确路由交给原生流解析器。
+// 网络响应和普通请求元数据无法构造此私有包装，因此缺少宿主注入时保持失败关闭。
+func InjectTrustedReasoningDisclosureEvidence(req *llm.CompletionRequest, provider, model string) {
+	if req == nil {
+		return
+	}
+	provider = strings.TrimSpace(provider)
+	model = strings.TrimSpace(model)
+	if provider == "" || model == "" {
+		return
+	}
+	if req.Metadata == nil {
+		req.Metadata = make(map[string]any, 1)
+	}
+	req.Metadata[trustedReasoningDisclosureEvidenceMetadataKey] = trustedReasoningDisclosureEvidence{
+		evidence: streamx.ReasoningDisclosureEvidence{
+			ExplicitlyPublic: true,
+			Provider:         provider,
+			Model:            model,
+		},
+	}
+}
+
+func trustedReasoningDisclosureEvidenceFromMetadata(metadata map[string]any) streamx.ReasoningDisclosureEvidence {
+	raw, ok := metadata[trustedReasoningDisclosureEvidenceMetadataKey]
+	if !ok {
+		return streamx.ReasoningDisclosureEvidence{}
+	}
+	evidence, ok := raw.(trustedReasoningDisclosureEvidence)
+	if !ok {
+		return streamx.ReasoningDisclosureEvidence{}
+	}
+	return evidence.evidence
+}
+
 // New 创建 Ollama Provider
 func New(opts ...Option) *Provider {
 	defaultPolicy := llm.NetworkPolicy{AllowHTTP: true, AllowPrivate: true}
@@ -154,6 +195,13 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	if req.Model == "" {
 		req.Model = p.model
 	}
+	reasoningPlan, explicitReasoning, err := ollamaReasoningPlan(req, p.baseURL)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningPlan.Receipt)
+		}
+		return nil, err
+	}
 	ctx, releaseWrite, err := p.lockNumCtxWrite(ctx, req.Model)
 	if err != nil {
 		return nil, err
@@ -188,13 +236,26 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	}
 	reservation.finish(true)
 
-	return p.parseResponse(&result, req.Model), nil
+	parsed := p.parseResponse(&result, req.Model)
+	if explicitReasoning {
+		receipt := reasoningPlan.Receipt.WithEvidence(true, result.Message.Thinking != "", 0)
+		parsed.ReasoningReceipt = &receipt
+		llm.PublishReasoningReceipt(req.Metadata, receipt)
+	}
+	return parsed, nil
 }
 
 // Stream 执行流式补全请求
 func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*streamx.Stream, error) {
 	if req.Model == "" {
 		req.Model = p.model
+	}
+	reasoningPlan, explicitReasoning, err := ollamaReasoningPlan(req, p.baseURL)
+	if err != nil {
+		if explicitReasoning {
+			llm.PublishReasoningReceipt(req.Metadata, reasoningPlan.Receipt)
+		}
+		return nil, err
 	}
 	ctx, releaseWrite, err := p.lockNumCtxWrite(ctx, req.Model)
 	if err != nil {
@@ -217,7 +278,15 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		reservation.finish(false)
 		return nil, fmt.Errorf("ollama request failed: %w", err)
 	}
-	parser := &ollamaStreamParser{}
+	parser := &ollamaStreamParser{
+		metadata:          req.Metadata,
+		reasoningEvidence: trustedReasoningDisclosureEvidenceFromMetadata(req.Metadata),
+	}
+	if explicitReasoning {
+		receipt := reasoningPlan.Receipt.WithEvidence(true, false, 0)
+		parser.receipt = receipt
+		llm.PublishReasoningReceipt(req.Metadata, receipt)
+	}
 	if reservation != nil {
 		reservation.bindContext(ctx)
 		parser.onSuccess = func() { reservation.finish(true) }
@@ -248,7 +317,7 @@ func (p *Provider) Models() []llm.ModelInfo {
 	}
 
 	// 返回常见模型的默认列表
-	return []llm.ModelInfo{
+	defaults := []llm.ModelInfo{
 		{
 			ID:          "llama3.2",
 			Name:        "Llama 3.2",
@@ -313,6 +382,10 @@ func (p *Provider) Models() []llm.ModelInfo {
 			Features:    []string{llm.FeatureVision, llm.FeatureStreaming},
 		},
 	}
+	for i := range defaults {
+		defaults[i].ReasoningSupport = llm.ReasoningUnknown
+	}
+	return defaults
 }
 
 func cloneModelInfos(models []llm.ModelInfo) []llm.ModelInfo {
@@ -379,11 +452,12 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 			maxTokens = defaultModelMaxTokens
 		}
 		models = append(models, llm.ModelInfo{
-			ID:          modelID,
-			Name:        modelID,
-			Description: fmt.Sprintf("%s model (%s)", m.Details.Family, m.Details.ParameterSize),
-			MaxTokens:   maxTokens,
-			Features:    ollamaCapabilitiesToFeatures(capabilities),
+			ID:               modelID,
+			Name:             modelID,
+			Description:      fmt.Sprintf("%s model (%s)", m.Details.Family, m.Details.ParameterSize),
+			MaxTokens:        maxTokens,
+			Features:         ollamaCapabilitiesToFeatures(capabilities),
+			ReasoningSupport: ollamaReasoningSupport(capabilities),
 		})
 	}
 
@@ -513,8 +587,12 @@ func (p *Provider) buildRequestBodyForSend(req llm.CompletionRequest, stream boo
 		"messages": messages,
 		"stream":   stream,
 	}
-	if think, ok := ollamaThinkFromMetadata(req.Metadata); ok {
-		payload["think"] = think
+	if plan, explicit, planErr := ollamaReasoningPlan(req, p.baseURL); planErr != nil {
+		return nil, 0, false, planErr
+	} else if explicit {
+		for field, value := range plan.Wire {
+			payload[field] = value
+		}
 	}
 	// 模型驻留（BUG-20260710）：metadata 按请求覆盖 > 选项/默认；空串=不下发
 	keepAlive := p.keepAlive
@@ -1150,6 +1228,48 @@ func ollamaThinkFromMetadata(metadata map[string]any) (any, bool) {
 	return false, false
 }
 
+func ollamaReasoningPlan(req llm.CompletionRequest, baseURL string) (llm.ReasoningPlan, bool, error) {
+	if plan, explicit, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, baseURL); explicit {
+		if err != nil {
+			return plan, true, err
+		}
+		if plan.Receipt.Support != llm.ReasoningUnknown {
+			return plan, true, nil
+		}
+	}
+	think, explicit := ollamaThinkFromMetadata(req.Metadata)
+	if !explicit {
+		return llm.ReasoningPlan{}, false, nil
+	}
+	enabled := true
+	if value, ok := think.(bool); ok {
+		enabled = value
+	}
+	return llm.ReasoningPlan{
+		Wire: map[string]any{"think": think},
+		Receipt: llm.ReasoningReceipt{
+			Version:     1,
+			Enabled:     enabled,
+			Support:     llm.ReasoningUnknown,
+			Dialect:     llm.ReasoningDialectThink,
+			Sent:        true,
+			Application: llm.ReasoningApplicationUnknown,
+		},
+	}, true, nil
+}
+
+func ollamaReasoningSupport(capabilities []string) llm.ReasoningSupport {
+	if capabilities == nil {
+		return llm.ReasoningUnknown
+	}
+	for _, capability := range capabilities {
+		if strings.EqualFold(strings.TrimSpace(capability), "thinking") {
+			return llm.ReasoningSupported
+		}
+	}
+	return llm.ReasoningUnsupported
+}
+
 // Ollama API 响应结构
 type ollamaResponse struct {
 	Model     string `json:"model"`
@@ -1212,6 +1332,8 @@ type ollamaStreamParser struct {
 	onFailure         func()
 	successOnce       sync.Once
 	reasoningEvidence streamx.ReasoningDisclosureEvidence
+	metadata          map[string]any
+	receipt           llm.ReasoningReceipt
 }
 
 func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
@@ -1246,6 +1368,20 @@ func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 			"message.thinking",
 			p.reasoningEvidence,
 		)
+		if p.receipt.Version == 0 {
+			p.receipt = llm.ReasoningReceipt{
+				Version:     1,
+				Enabled:     true,
+				Support:     llm.ReasoningUnknown,
+				Dialect:     llm.ReasoningDialectThink,
+				Application: llm.ReasoningApplicationUnknown,
+			}
+		}
+		p.receipt = p.receipt.WithEvidence(true, true, 0)
+		llm.PublishReasoningReceipt(p.metadata, p.receipt)
+	}
+	if p.receipt.Version != 0 {
+		chunk.ReasoningEvidence = llm.ReasoningEvidenceMap(p.receipt)
 	}
 	if resp.Done {
 		chunk.FinishReason = resp.DoneReason
