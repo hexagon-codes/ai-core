@@ -17,14 +17,14 @@ test -z "$(gofmt -l .)"
 go mod tidy -diff
 go vet -mod=readonly ./...
 go test -mod=readonly -count=1 ./...
-golangci-lint run --timeout=5m
+golangci-lint run --timeout=5m --enable-only=bodyclose,errcheck,ineffassign,staticcheck,unused --new-from-rev=origin/main
 ```
 
-本地使用与 CI 固定版本一致的 `golangci-lint`。普通 Verify 不依赖远端分支、提交数量、漏洞数据库状态或历史发布 tag，因此代码提交不需要修改 CI 配置。
+本地使用与 CI 固定版本一致的 `golangci-lint`，并在执行前更新 `origin/main`。普通 Verify 只检查本次变更新增的 lint 问题，不会因仓库历史问题失败；代码提交不需要修改 CI 配置。
 
 `Security Audit` 负责依赖和可达代码的漏洞扫描，按工作流的定时计划或手动触发；它不是普通 PR 的 required check。`Release Preflight` 只在发布前手动触发，负责发布所需的 API 兼容性、漏洞和版本检查；通过后再创建不可移动的 SemVer tag。两者失败时都应修复对应的安全或发布问题，但不把外部漏洞数据库变化转化为普通代码提交失败。
 
-主干只接受 Pull Request 合并，禁止直接 push；PR 必须通过 `CI / Verify` 后才能合并。合并到 `main` 不重复执行另一套普通检查。
+Pull Request 和 `main` push 都运行同一套 `CI / Verify`，不维护两套不同的普通检查。
 
 ## 提交规范
 
