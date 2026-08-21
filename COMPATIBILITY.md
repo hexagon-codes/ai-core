@@ -17,17 +17,25 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - Network policy 默认不启用，以保持本地服务与私有兼容网关的向后兼容；显式传入零值 `NetworkPolicy` 时启用 public HTTPS 策略。
 - `llm.Provider` / `llm.TokenCounter` 保留既有 `CountTokens` 方法集；可取消计数通过 opt-in 的 `llm.ContextTokenCounter` 提供。`llm.CountTokensContext` 对旧实现仅保证调用前检查 context，旧同步调用开始后无法被强制取消；健康检查会跳过旧实现并保留既有健康状态。
 
-## 自动门禁
+## CI/CD 边界与门禁
 
-统一的 `.github/workflows/ci.yml` 只验证本库可控的不变量：
+ai-core 是公共源码 Go module，不是需要运行时部署的应用，因此不建设 CD、镜像发布、服务器部署或自动推广流水线。版本发布由维护者在验证完成后创建正式 SemVer tag；tag 是唯一的发布来源，已发布 tag 不删除、不移动，发现问题通过新的 patch 版本修复。
 
-1. 最低支持 Go 版本运行全量测试，当前稳定 Go 版本运行全量 race 测试。
-2. `gofmt`、`go mod tidy -diff`、`go vet` 与 golangci-lint 校验新增代码。
-3. `govulncheck` 对依赖与可达代码执行失败关闭的漏洞扫描。
-4. Pull Request 与 main push 均以前一状态可达的最新正式 SemVer tag 为基线执行 `apidiff`；工具错误与破坏性公开 API 变更都会阻断。
+普通 Pull Request 只运行唯一的 `CI / Verify` 检查，验证本库可控且稳定的不变量：
 
-具体消费项目的兼容验证由消费方在升级 ai-core 版本时执行，不反向决定 ai-core 自身 CI 是否通过。
-自动门禁默认阻断所有破坏性变更，包括 v0.x；确需发布 v0.x 破坏性变更时，必须先获得维护者对具体变更与迁移方案的明确批准，再按 minor 版本和 BREAKING 记录处理，不能通过吞掉检查错误放行。
+1. 按 `go.mod` 声明的最低支持 Go 版本运行全量测试。
+2. 执行 `gofmt`、`go mod tidy -diff`、`go vet` 和固定版本的 correctness-only lint。
+3. 只在 Pull Request 上运行，不因合并后的 main push 再重复触发同一套必需检查。
+
+安全审计与发布判断不属于普通代码验证：
+
+- `govulncheck` 放在独立的定期或手动 `Security Audit` 流程中；它反映外部漏洞数据库和工具链变化，不得让无代码变化的普通 PR 因时间漂移反复失败。
+- `apidiff` 和 SemVer 兼容性检查放在独立的发布前流程中，以明确指定的上一个正式 tag 为基线；工具或基线问题只阻断发布，不改变普通 Verify 的职责。
+- 具体消费项目的编译、测试和集成回归由消费方在升级 ai-core 时执行，不反向决定 ai-core 普通 Verify 是否通过。
+
+普通 Verify 仍应阻断当前代码真实违反的格式、模块、静态正确性或测试不变量。不得通过吞掉检查错误、动态猜测基线或修改 CI 配置来掩盖问题。
+
+v1 及以上版本的破坏性公开 API 只能在 major 版本发布。v0.x 仍遵循以下明确规则：patch 版本不得破坏 API；确需破坏时至少提升 minor 版本，提前获得维护者对具体变更与迁移方案的明确批准，并在 CHANGELOG 显著标注 `BREAKING`。发布前兼容性流程必须拒绝未满足这些规则的 tag。
 
 ## 弃用与发布
 

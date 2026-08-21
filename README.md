@@ -22,7 +22,7 @@
 ## 安装
 
 ```bash
-go get github.com/hexagon-codes/ai-core@v0.2.10
+go get github.com/hexagon-codes/ai-core@latest
 ```
 
 ## 快速开始

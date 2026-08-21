@@ -4,6 +4,12 @@
 
 ## [Unreleased]
 
+### Changed
+- CI/CD 收敛为单一 PR `Verify` 工作流，只验证本公共库可控的格式、依赖、静态检查与测试不变量。
+- 安全扫描与公开 API 兼容性检查移至独立的 `Security Audit` 与 `Release Preflight`，不再阻断普通代码变更。
+- 版本来源统一以 Git tag 为准，移除重复的 `VERSION` 版本源及其精确绑定校验。
+- 移除 `main` push 的重复执行，合并前由 PR `Verify` 完成校验。
+
 ## [0.2.10]
 
 ### Changed
