@@ -1,0 +1,164 @@
+name: Release Preflight
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_tag:
+        description: "上一个正式 SemVer tag，例如 v0.2.10"
+        required: true
+        type: string
+      candidate_ref:
+        description: "待发布 commit、分支或 tag"
+        required: true
+        default: main
+        type: string
+      version:
+        description: "拟发布 SemVer，例如 v0.2.11"
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-preflight-${{ inputs.candidate_ref }}-${{ inputs.version }}
+  cancel-in-progress: true
+
+env:
+  GOTOOLCHAIN: local
+  GOWORK: off
+
+jobs:
+  preflight:
+    name: Preflight
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ inputs.candidate_ref }}
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version-file: go.mod
+          cache-dependency-path: go.sum
+
+      - name: Lint correctness
+        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
+        with:
+          version: v2.12.2
+          args: --timeout=5m --enable-only=bodyclose,errcheck,ineffassign,staticcheck,unused
+
+      - name: Verify candidate
+        run: |
+          set -euo pipefail
+          test -z "$(gofmt -l .)"
+          go mod tidy -diff
+          go vet -mod=readonly ./...
+          go test -mod=readonly -count=1 ./...
+
+      - name: Validate release version
+        env:
+          BASE_TAG: ${{ inputs.base_tag }}
+          VERSION: ${{ inputs.version }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          semver='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+          [[ "$BASE_TAG" =~ $semver ]] || { echo "base_tag must be a SemVer tag"; exit 1; }
+          [[ "$VERSION" =~ $semver ]] || { echo "version must be a SemVer tag"; exit 1; }
+          git rev-parse --verify "refs/tags/$BASE_TAG^{commit}" >/dev/null
+          if git rev-parse --verify "refs/tags/$VERSION^{commit}" >/dev/null 2>&1; then
+            echo "version tag already exists"
+            exit 1
+          fi
+          git merge-base --is-ancestor "refs/tags/$BASE_TAG^{commit}" HEAD || {
+            echo "base_tag must be an ancestor of candidate_ref"
+            exit 1
+          }
+          if [[ "$BASE_TAG" == "$VERSION" ]]; then
+            echo "version must differ from base_tag"
+            exit 1
+          fi
+          if [[ "$(printf '%s\n' "$BASE_TAG" "$VERSION" | sort -V | tail -n 1)" != "$VERSION" ]]; then
+            echo "version must be greater than base_tag"
+            exit 1
+          fi
+
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: stable
+          cache-dependency-path: go.sum
+
+      - name: Install release tools
+        env:
+          GOBIN: ${{ runner.temp }}/go-bin
+        run: |
+          set -euo pipefail
+          go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260727155853-b88d891fe743
+          go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+
+      - name: Security audit
+        run: ${{ runner.temp }}/go-bin/govulncheck ./...
+
+      - name: Check public API compatibility
+        env:
+          BASE_TAG: ${{ inputs.base_tag }}
+          VERSION: ${{ inputs.version }}
+          GOBIN: ${{ runner.temp }}/go-bin
+        shell: bash
+        run: |
+          set -euo pipefail
+          module_path="$(go list -mod=readonly -m -f '{{.Path}}')"
+          work_dir="$(mktemp -d)"
+          base_dir="$work_dir/base"
+          trap 'git worktree remove --force "$base_dir" >/dev/null 2>&1 || true; rm -rf "$work_dir"' EXIT
+          git worktree add --detach "$base_dir" "$BASE_TAG"
+
+          base_module_path="$(cd "$base_dir" && go list -mod=readonly -m -f '{{.Path}}')"
+          if [[ "$module_path" != "$base_module_path" ]]; then
+            echo "module path changed from $base_module_path to $module_path"
+            exit 1
+          fi
+
+          "$GOBIN/apidiff" -m -w "$work_dir/current.export" "$module_path"
+          (cd "$base_dir" && "$GOBIN/apidiff" -m -w "$work_dir/base.export" "$base_module_path")
+          "$GOBIN/apidiff" -m -incompatible "$work_dir/base.export" "$work_dir/current.export" > "$work_dir/report.txt"
+
+          if [[ ! -s "$work_dir/report.txt" ]]; then
+            echo "No incompatible public API changes detected."
+            exit 0
+          fi
+
+          cat "$work_dir/report.txt"
+          IFS=. read -r base_major base_minor _ <<< "${BASE_TAG#v}"
+          IFS=. read -r version_major version_minor _ <<< "${VERSION#v}"
+
+          has_breaking_entry=false
+          if awk '
+            /^## \[Unreleased\]/ { in_unreleased = 1; next }
+            /^## / { in_unreleased = 0 }
+            in_unreleased && /BREAKING/ { found = 1 }
+            END { exit(found ? 0 : 1) }
+          ' CHANGELOG.md; then
+            has_breaking_entry=true
+          fi
+
+          if (( base_major == 0 )); then
+            if (( version_major == 0 && version_minor <= base_minor )); then
+              echo "Breaking v0.x changes require a higher minor version."
+              exit 1
+            fi
+            if [[ "$has_breaking_entry" != true ]]; then
+              echo "Breaking changes require a BREAKING changelog entry."
+              exit 1
+            fi
+          elif (( version_major <= base_major )); then
+            echo "Breaking API changes require a higher major version."
+            exit 1
+          fi
+
+          echo "Breaking API changes are allowed by the requested SemVer transition."

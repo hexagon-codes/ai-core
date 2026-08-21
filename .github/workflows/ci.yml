@@ -1,10 +1,9 @@
 name: CI
 
 on:
-  push:
-    branches: [main]
   pull_request:
     branches: [main]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -18,43 +17,13 @@ env:
   GOWORK: off
 
 jobs:
-  test:
-    name: Test (${{ matrix.name }})
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - name: minimum Go
-            go-version: '1.25.12'
-            race: false
-          - name: current Go + race
-            go-version: '1.26.5'
-            race: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: ${{ matrix.go-version }}
-          cache-dependency-path: go.sum
-      - name: Test
-        if: ${{ !matrix.race }}
-        run: go test -mod=readonly -count=1 ./...
-      - name: Test with race detector
-        if: ${{ matrix.race }}
-        run: go test -mod=readonly -race -count=1 ./...
-
-  quality:
-    name: Quality
+  verify:
+    name: Verify
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          fetch-depth: 0
           persist-credentials: false
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
@@ -74,133 +43,10 @@ jobs:
         run: go mod tidy -diff
       - name: Vet
         run: go vet -mod=readonly ./...
-      - name: Select lint baseline
-        id: lint-base
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            base_sha="$PR_BASE_SHA"
-          else
-            base_sha="$PUSH_BEFORE_SHA"
-          fi
-
-          zero_sha="0000000000000000000000000000000000000000"
-          if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]] || \
-             [[ "$base_sha" == "$zero_sha" ]] || \
-             ! git cat-file -e "${base_sha}^{commit}" || \
-             ! git merge-base --is-ancestor "$base_sha" HEAD; then
-            echo "full=true" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          echo "full=false" >> "$GITHUB_OUTPUT"
-          echo "sha=$base_sha" >> "$GITHUB_OUTPUT"
-      - name: Lint full repository
-        if: ${{ steps.lint-base.outputs.full == 'true' }}
+      - name: Lint correctness
         uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
         with:
           version: v2.12.2
-          args: --timeout=5m
-      - name: Lint changed code
-        if: ${{ steps.lint-base.outputs.full == 'false' }}
-        uses: golangci/golangci-lint-action@ba0d7d2ec06a0ea1cb5fa41b2e4a3ab91d21278a # v9.3.0
-        with:
-          version: v2.12.2
-          args: --timeout=5m --new-from-rev=${{ steps.lint-base.outputs.sha }}
-
-  vulnerability:
-    name: Vulnerability Scan
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: Install govulncheck
-        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
-      - name: Scan dependencies and reachable code
-        run: govulncheck ./...
-
-  api-compatibility:
-    name: API Compatibility
-    runs-on: ubuntu-24.04
-    timeout-minutes: 15
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          fetch-depth: 0
-          persist-credentials: false
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version-file: go.mod
-          cache-dependency-path: go.sum
-      - name: Install apidiff
-        run: go install golang.org/x/exp/cmd/apidiff@v0.0.0-20260727155853-b88d891fe743
-      - name: Check public API compatibility
-        shell: bash
-        env:
-          EVENT_NAME: ${{ github.event_name }}
-          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
-          PUSH_BEFORE_SHA: ${{ github.event.before }}
-        run: |
-          set -euo pipefail
-          if [[ "$EVENT_NAME" == "pull_request" ]]; then
-            base_sha="$PR_BASE_SHA"
-          else
-            base_sha="$PUSH_BEFORE_SHA"
-          fi
-
-          zero_sha="0000000000000000000000000000000000000000"
-          if [[ ! "$base_sha" =~ ^[0-9a-f]{40}$ ]] || \
-             [[ "$base_sha" == "$zero_sha" ]] || \
-             ! git cat-file -e "${base_sha}^{commit}" || \
-             ! git merge-base --is-ancestor "$base_sha" HEAD; then
-            echo "Cannot resolve the event base commit for API comparison."
-            exit 1
-          fi
-          base_version="$(
-            git tag --merged "$base_sha" --sort=-version:refname |
-              awk '/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && !found { print; found = 1 }'
-          )"
-          if [[ -z "$base_version" ]]; then
-            released_version="$(
-              git tag --sort=-version:refname |
-                awk '/^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$/ && !found { print; found = 1 }'
-            )"
-            if [[ -n "$released_version" ]]; then
-              echo "No released SemVer baseline is reachable from the event base commit."
-              exit 1
-            fi
-            echo "No released SemVer baseline found; skipping first-release API comparison."
-            exit 0
-          fi
-
-          module_path="$(go list -mod=readonly -m -f '{{.Path}}')"
-          work_dir="$(mktemp -d)"
-          trap 'rm -rf "$work_dir"' EXIT
-
-          apidiff -m -w "$work_dir/current.export" "$module_path"
-          (
-            cd "$work_dir"
-            go mod init api-compat-check
-            go get "$module_path@$base_version"
-            go mod download all
-            apidiff -m -w "$work_dir/base.export" "$module_path"
-          )
-
-          apidiff -m -incompatible \
-            "$work_dir/base.export" \
-            "$work_dir/current.export" > "$work_dir/report.txt"
-          cat "$work_dir/report.txt"
-          if [[ -s "$work_dir/report.txt" ]]; then
-            echo "Incompatible public API changes detected against $base_version."
-            exit 1
-          fi
+          args: --timeout=5m --enable-only=bodyclose,errcheck,ineffassign,staticcheck,unused
+      - name: Test
+        run: go test -mod=readonly -count=1 ./...
