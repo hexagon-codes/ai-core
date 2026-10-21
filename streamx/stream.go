@@ -103,6 +103,8 @@ func isKnownReasoningDialect(source, dialect string) bool {
 // 每次从流中读取数据时，会解析为一个 Chunk 对象
 // 多个 Chunk 的 Content 拼接后形成完整的响应内容
 type Chunk struct {
+	// Usage 是上游报告的本次请求累计用量；nil 表示该帧没有用量信息。
+	Usage *Usage `json:"usage,omitempty"`
 	// ID 响应的唯一标识符，通常在首个块中返回
 	ID string `json:"id,omitempty"`
 	// Content 本次增量的文本内容
@@ -654,6 +656,10 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			}
 			if chunk.FinishReason != "" {
 				s.result.FinishReason = chunk.FinishReason
+			}
+			if chunk.Usage != nil {
+				// OpenAI 的 usage 是累计快照，重复终帧不可重复累加。
+				s.result.Usage = *chunk.Usage
 			}
 			if chunk.ReasoningEvidence != nil {
 				s.result.ReasoningEvidence = cloneReasoningEvidence(chunk.ReasoningEvidence)

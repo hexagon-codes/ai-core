@@ -16,6 +16,7 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - `catalog.Capability` 是调用方做模型选择与 conformance 校验的稳定数据契约；新增字段只做加法，已有字段语义不得在 patch / minor 中收窄。
 - Network policy 默认不启用，以保持本地服务与私有兼容网关的向后兼容；显式传入零值 `NetworkPolicy` 时启用 public HTTPS 策略。
 - `llm.Provider` / `llm.TokenCounter` 保留既有 `CountTokens` 方法集；可取消计数通过 opt-in 的 `llm.ContextTokenCounter` 提供。`llm.CountTokensContext` 对旧实现仅保证调用前检查 context，旧同步调用开始后无法被强制取消；健康检查会跳过旧实现并保留既有健康状态。
+- `streamx.Chunk.Usage` 是可选的单请求累计用量快照，nil 表示该帧未报告用量。OpenAI 格式的 `streamx.Result.Usage` 保留最后一份已报告快照，空 `choices` 的统计帧有效；调用方不得将同一次请求的快照逐帧累加，不同请求的结果仍可累加。
 
 ## CI/CD 边界与门禁
 

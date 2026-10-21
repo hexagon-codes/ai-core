@@ -63,6 +63,9 @@ func (p *OpenAIParser) Parse(data []byte) (*Chunk, error) {
 		Model: oai.Model,
 		Raw:   data,
 	}
+	if oai.Usage != nil {
+		chunk.Usage = &Usage{PromptTokens: oai.Usage.PromptTokens, CompletionTokens: oai.Usage.CompletionTokens, TotalTokens: oai.Usage.TotalTokens}
+	}
 
 	if len(oai.Choices) > 0 {
 		choice := oai.Choices[0]

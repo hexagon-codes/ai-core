@@ -4,6 +4,8 @@
 
 An open-source AI foundation library for any Go application or agent framework, with unified model, tool, memory, streaming, and media abstractions.
 
+> Documentation version: **v0.2.12** ([changes](CHANGELOG.md#0212---2026-10-21)).
+
 ## Features
 
 - **Unified LLM Interface** — One API, multiple providers (OpenAI, Anthropic, DeepSeek, Gemini, Qwen, Doubao, ERNIE, Ollama)
@@ -72,7 +74,13 @@ defer stream.Close()
 for chunk := range stream.Chunks() {
     fmt.Print(chunk.Content)
 }
+if result := stream.Result(); result != nil {
+    fmt.Printf("\nTokens: input=%d output=%d total=%d\n",
+        result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+}
 ```
+
+For OpenAI-compatible SSE responses containing `usage`, `chunk.Usage` is a cumulative snapshot for that request; nil means the frame does not report usage. `stream.Result().Usage` retains the last reported snapshot. Repeated snapshots are not added together, later frames without usage do not clear it, and statistics frames with empty `choices` still update the result. If the upstream reports no usage, the result stays at zero without estimation. Callers accumulate the results of separate model calls themselves.
 
 ### Tool Calling
 

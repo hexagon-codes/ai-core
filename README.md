@@ -4,6 +4,8 @@
 
 面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库，提供统一的模型、工具、记忆、流式与媒体抽象。
 
+> 文档对应版本：**v0.2.12**（[变更记录](CHANGELOG.md#0212---2026-10-21)）。
+
 ## 特性
 
 - **统一的 LLM 接口** - 一套代码，多家 Provider（OpenAI、Anthropic、DeepSeek、Gemini、通义千问、豆包、文心一言、Ollama）
@@ -72,7 +74,13 @@ defer stream.Close()
 for chunk := range stream.Chunks() {
     fmt.Print(chunk.Content)
 }
+if result := stream.Result(); result != nil {
+    fmt.Printf("\nTokens: input=%d output=%d total=%d\n",
+        result.Usage.PromptTokens, result.Usage.CompletionTokens, result.Usage.TotalTokens)
+}
 ```
+
+OpenAI-compatible SSE 返回 `usage` 时，`chunk.Usage` 是该请求的累计快照；nil 表示该帧没有报告用量。`stream.Result().Usage` 保留最后一份报告，重复快照不累加，后续无用量帧不清零，空 `choices` 统计帧也会更新结果。上游未报告用量时保留零值，不作估算；多次模型调用的用量由调用方累加各次结果。
 
 ### 工具调用
 
