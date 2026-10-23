@@ -8,6 +8,7 @@ package voice
 
 import (
 	"context"
+	"os"
 	"testing"
 	"time"
 )
@@ -27,6 +28,12 @@ func TestEdgeTTS_Integration_RealEndpointReturnsMP3(t *testing.T) {
 	// MP3 magic：ID3 或帧同步 0xFF。
 	if len(res.Audio) < 1000 || !(res.Audio[0] == 0xFF || string(res.Audio[:3]) == "ID3") {
 		t.Errorf("返回内容不像 MP3：%d 字节，头 %x", len(res.Audio), res.Audio[:min(4, len(res.Audio))])
+	}
+	// 集成验证可显式保存本次音频，供解码与内容核验；普通测试不写产物。
+	if output := os.Getenv("HEXCLAW_EDGE_TTS_TEST_OUTPUT"); output != "" {
+		if err := os.WriteFile(output, res.Audio, 0o600); err != nil {
+			t.Fatalf("save Edge TTS test audio: %v", err)
+		}
 	}
 	t.Logf("真实 Edge TTS OK：%d 字节 MP3", len(res.Audio))
 }

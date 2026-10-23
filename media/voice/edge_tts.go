@@ -7,6 +7,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math"
+	"math/bits"
 	"net/http"
 	"os"
 	"strings"
@@ -14,6 +15,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/coder/websocket"
+	"github.com/hexagon-codes/ai-core/transport"
 	"github.com/hexagon-codes/toolkit/net/httpx"
 )
 
@@ -48,9 +50,8 @@ const (
 	// edgeTrustedClientToken 是 Edge Read Aloud 公开的固定客户端 token（与 edge-tts 社区实现一致）。
 	edgeTrustedClientToken = "6A5AA1D4EAFF4E9FB37E23D68491D6F4"
 	// defaultEdgeSecMSGECVersion 是 Sec-MS-GEC token 一起上送的客户端版本标识的默认值。
-	// ⚠ 微软会校验该版本：过旧会被拒（403）。需随上游 edge-tts 周期性同步到较新 Edge 版本，
-	// 或经环境变量 HEXCLAW_EDGE_TTS_GEC_VERSION 线上热修（无需重编）。
-	defaultEdgeSecMSGECVersion = "1-143.0.3650.75"
+	// 版本前缀必须与 token 的 v2 摘要格式一致，客户端版本仍支持环境变量覆盖。
+	defaultEdgeSecMSGECVersion = "2-143.0.3650.75"
 	// defaultEdgeUserAgent 与 GEC 版本对应的 UA（可经 HEXCLAW_EDGE_TTS_UA 覆盖）。
 	defaultEdgeUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/143.0.0.0 Safari/537.36 Edg/143.0.0.0"
 	// edgeOutputFormat 请求 24kHz 48kbps 单声道 MP3（Tauri/WKWebView 通吃）。
@@ -179,7 +180,7 @@ func (t *EdgeTTS) effectiveTimeout(text string) time.Duration {
 // 健壮性：握手 403 且检测到客户端/服务端时钟偏移（>阈值）时，按服务端时间重算 token 重试一次。
 func (t *EdgeTTS) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesizeResult, error) {
 	if text == "" {
-		return nil, fmt.Errorf("文本内容为空")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("文本内容为空")}
 	}
 	if ctx == nil {
 		ctx = context.Background()
@@ -234,6 +235,14 @@ func (t *EdgeTTS) synthesizeOnce(ctx context.Context, text, ssml string, skew ti
 		HTTPHeader: t.wsHeaders(),
 	})
 	if err != nil {
+		// 握手失败时尚未发送合成文本，保留响应状态和未接纳语义。
+		if resp != nil {
+			err = &transport.ProviderError{
+				Provider: t.Name(), Action: "tts.handshake", Method: http.MethodGet,
+				StatusCode: resp.StatusCode, Status: resp.Status, Cause: err,
+			}
+		}
+		err = &definitiveSynthesisError{cause: err}
 		// 403 + 显著时钟偏移：返回偏移让上层按服务端时间重算 token 重试。
 		if resp != nil && resp.StatusCode == http.StatusForbidden {
 			if d := serverDateSkew(resp, t.now()); d > edgeSkewRetryThreshold || d < -edgeSkewRetryThreshold {
@@ -323,15 +332,54 @@ func parseEdgeAudioFrame(data []byte) ([]byte, bool) {
 
 // edgeSecMSGEC 生成 Edge TTS 防滥用 token Sec-MS-GEC。
 //
-// 算法（与 edge-tts 一致）：取当前 Windows 文件时间（自 1601-01-01 起的 100ns 计数），
-// 向下取整到最近 5 分钟边界，与 TrustedClientToken 拼接后 SHA256，输出大写十六进制。
+// v2 将 Windows 文件时间对齐到 5 分钟窗口，在时间与客户端标识前加入固定协议前缀，
+// 分别计算标准 SHA-256 和 CS64，输出 16 位十六进制、连字符、64 位十六进制。
+// 协议参数来源：https://github.com/rany2/edge-tts/issues/490#issuecomment-6126621790
 func edgeSecMSGEC(now time.Time) string {
 	const winEpochOffsetSec = 11644473600 // 1601→1970 秒差
 	const fiveMinTicks = 3_000_000_000    // 300s × 10^7 ticks
 	ticks := (now.UTC().Unix() + winEpochOffsetSec) * 10_000_000
 	ticks -= ticks % fiveMinTicks
-	sum := sha256.Sum256(fmt.Appendf(nil, "%d%s", ticks, edgeTrustedClientToken))
-	return fmt.Sprintf("%X", sum[:])
+	// 此字符串是摘要输入的一部分，不是代码的版权声明。
+	const prefix = "Copyright (C) Microsoft Corporation. All rights reserved."
+	data := fmt.Appendf(nil, "%s%d%s", prefix, ticks, edgeTrustedClientToken)
+	digest := sha256.Sum256(data)
+	checksum := edgeCS64(data, digest)
+	return fmt.Sprintf("%X-%X", checksum, digest)
+}
+
+// edgeCS64 使用摘要前两个小端奇数作为密钥，对补齐到 8 字节的输入执行两条 32 位变换。
+// 一条累加字交换结果，另一条累加依赖前一字的状态；最终将两条链的末态与累加值分别异或。
+func edgeCS64(data []byte, digest [sha256.Size]byte) [8]byte {
+	keys := [2]uint32{binary.LittleEndian.Uint32(digest[:4]) | 1, binary.LittleEndian.Uint32(digest[4:8]) | 1}
+	// 每行依次为字交换的三个乘数与状态链的四个乘数，分别作用于偶数字和奇数字。
+	coefficients := [2][7]uint32{
+		{0xEF0569FB, 0x76F50F34, 0xC3EFEA97, 0xCF98B111, 0x87085B9F, 0x12CEB96D, 0x257E1D83},
+		{0xC31713DB, 0x1881CE3C, 0x35BD1EC9, 0xA27416F5, 0xD38396FF, 0x7C932B89, 0xBFA49F69},
+	}
+	var swapped, swapTotal, chained, chainTotal uint32
+	for offset := 0; offset < (len(data)+7)/8*8; offset += 4 {
+		var encoded [4]byte
+		if offset < len(data) {
+			copy(encoded[:], data[offset:])
+		}
+		word := binary.LittleEndian.Uint32(encoded[:])
+		parity := offset / 4 % 2
+		constants := coefficients[parity]
+		swapped = bits.RotateLeft32(word, 16)*constants[0] + word*keys[parity]
+		swapped = bits.RotateLeft32(swapped, 16) * constants[1]
+		swapped += bits.RotateLeft32(swapped, 16) * constants[2]
+		swapTotal += swapped
+		chained = (chained + word) * keys[parity]
+		for _, multiplier := range constants[3:] {
+			chained = bits.RotateLeft32(chained, 16) * multiplier
+		}
+		chainTotal += chained
+	}
+	var checksum [8]byte
+	binary.LittleEndian.PutUint32(checksum[:4], swapped^chained)
+	binary.LittleEndian.PutUint32(checksum[4:], swapTotal^chainTotal)
+	return checksum
 }
 
 // serverDateSkew 从 403 响应的 Date 头估算「服务端时间 - 客户端时间」偏移；不可解析则返回 0。

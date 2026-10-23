@@ -170,15 +170,15 @@ func TestEdgeTTS_GECVersionOverride(t *testing.T) {
 	tts := NewEdgeTTS(
 		EdgeTTSWithEndpoint(wsURL(srv.URL)),
 		EdgeTTSWithHTTPClient(srv.Client()),
-		EdgeTTSWithGECVersion("1-999.0.0.0"),
+		EdgeTTSWithGECVersion("2-999.0.0.0"),
 	)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if _, err := tts.Synthesize(ctx, "x", SynthesizeOptions{}); err != nil {
 		t.Fatalf("Synthesize 失败: %v", err)
 	}
-	if !strings.Contains(cap.rawQuery(), "Sec-MS-GEC-Version=1-999.0.0.0") {
-		t.Errorf("握手 query 未带覆盖后的版本: %q", cap.rawQuery())
+	if !strings.Contains(cap.rawQuery(), "Sec-MS-GEC-Version=2-999.0.0.0") {
+		t.Error("握手 query 未带覆盖后的协议版本")
 	}
 }
 
@@ -252,15 +252,20 @@ func TestEdgeTTS_Synthesize_RetriesOn403ClockSkew(t *testing.T) {
 }
 
 func TestEdgeSecMSGEC_DeterministicHexUpper(t *testing.T) {
-	// 同一 5 分钟窗口内 token 稳定；输出为 64 位大写十六进制。
+	// 维护者独立抓包向量：https://github.com/rany2/edge-tts/pull/492
+	captured := "492D7694A183A45E-56E821F95D4579C5B7C7E33DC7303FF379EC36D510213555BBBB9EB17EF15876"
+	if got := edgeSecMSGEC(time.Unix(1791888000, 0)); got != captured {
+		t.Fatalf("v2 token differs from the captured protocol vector: %s", got)
+	}
+	// 同一 5 分钟窗口内 token 稳定；输出为 16 位 CS64 与 64 位 SHA-256。
 	base := time.Date(2026, 6, 26, 10, 1, 0, 0, time.UTC)
 	a := edgeSecMSGEC(base)
 	b := edgeSecMSGEC(base.Add(90 * time.Second)) // 同 5 分钟窗口
 	if a != b {
 		t.Errorf("同窗口 token 应一致：%s vs %s", a, b)
 	}
-	if len(a) != 64 {
-		t.Fatalf("token 应为 64 位十六进制，实际 %d 位", len(a))
+	if len(a) != 81 || a[16] != '-' {
+		t.Fatalf("token 应为 16 位 CS64、连字符和 64 位 SHA-256，实际长度 %d", len(a))
 	}
 	if a != strings.ToUpper(a) {
 		t.Error("token 应为大写十六进制")
