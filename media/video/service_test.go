@@ -5,7 +5,75 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
+
+func TestService_TaskReferenceKeepsRegisteredInstance(t *testing.T) {
+	for _, key := range []string{"gateway-a", "gateway::a"} {
+		t.Run(key, func(t *testing.T) {
+			first := &mockVideoProvider{name: "compatible", models: []string{"shared"}, submitID: "raw::123", status: TaskStatus{Done: true}}
+			other := &mockVideoProvider{name: "compatible", models: []string{"shared"}}
+			svc := NewService(map[string]Provider{key: first, "gateway-b": other}, key)
+			id, err := svc.Submit(context.Background(), key, Request{Prompt: "a cat", Model: "shared"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.Poll(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			if first.lastRawID != "raw::123" || first.pollCall != 1 || other.pollCall != 0 {
+				t.Fatalf("wrong instance or raw task: first=%+v other=%+v", first, other)
+			}
+		})
+	}
+}
+
+func TestService_TaskReferenceAvoidsLegacyPrefixCollision(t *testing.T) {
+	for _, tc := range []struct {
+		name, otherKey, otherName string
+	}{
+		{name: "registered key", otherKey: "x::part", otherName: "other"},
+		{name: "provider name", otherKey: "other", otherName: "x::part"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			first := &mockVideoProvider{name: "x", submitID: "part::123", status: TaskStatus{Done: true}}
+			other := &mockVideoProvider{name: tc.otherName}
+			svc := NewService(map[string]Provider{"x": first, tc.otherKey: other}, "x")
+			id, err := svc.Submit(context.Background(), "x", Request{Prompt: "a cat"})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := svc.Poll(context.Background(), id); err != nil {
+				t.Fatal(err)
+			}
+			if first.lastRawID != "part::123" || first.pollCall != 1 || other.pollCall != 0 {
+				t.Fatalf("task was not resolved to its original instance: first=%+v other=%+v", first, other)
+			}
+		})
+	}
+}
+
+func TestService_LegacyTaskReferenceRejectsAmbiguousInstance(t *testing.T) {
+	first := &mockVideoProvider{name: "compatible", models: []string{"a"}}
+	other := &mockVideoProvider{name: "other", models: []string{"b"}}
+	svc := NewService(map[string]Provider{"first": first, "compatible": other}, "first")
+	if _, err := svc.Poll(context.Background(), "compatible::old-task"); err == nil {
+		t.Fatal("ambiguous legacy task must not select either instance")
+	}
+	if first.pollCall != 0 || other.pollCall != 0 {
+		t.Fatal("ambiguous task was polled")
+	}
+}
+
+func TestService_SubmitAndWaitKeepsTaskOnFirstPollError(t *testing.T) {
+	want := errors.New("temporary poll failure")
+	p := &mockVideoProvider{name: "x", submitID: "created", pollErr: want}
+	svc := NewService(map[string]Provider{"x": p}, "x")
+	st, err := svc.SubmitAndWait(context.Background(), "x", Request{Prompt: "a cat"}, time.Millisecond)
+	if !errors.Is(err, want) || st.TaskID != "x::created" || p.submitCall != 1 {
+		t.Fatalf("submitted task lost: status=%+v err=%v submits=%d", st, err, p.submitCall)
+	}
+}
 
 // mockVideoProvider 模拟视频生成 Provider。
 type mockVideoProvider struct {

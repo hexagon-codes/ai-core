@@ -15,14 +15,14 @@ import (
 // 直接用 Submit + Poll。
 //
 // pollInterval <= 0 时使用 media.DefaultPollInterval。
-// 返回的 TaskStatus 在出错时为最后一次成功获取的状态（可能为零值）。
+// 提交成功后，即使首次查询失败，返回状态仍保留可恢复的 TaskID。
 func (s *Service) SubmitAndWait(ctx context.Context, providerName string, req Request, pollInterval time.Duration) (TaskStatus, error) {
 	taskID, err := s.Submit(ctx, providerName, req)
 	if err != nil {
 		return TaskStatus{}, err
 	}
 
-	var last TaskStatus
+	last := TaskStatus{TaskID: taskID}
 	waitErr := media.WaitFor(ctx, pollInterval, func(ctx context.Context) (bool, error) {
 		st, perr := s.Poll(ctx, taskID)
 		if perr != nil {

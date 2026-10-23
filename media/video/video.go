@@ -9,6 +9,7 @@ package video
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"sort"
 	"strings"
@@ -72,7 +73,7 @@ type TaskStatus struct {
 // Service 视频生成服务（多 Provider 路由）。
 type Service struct {
 	providers       map[string]Provider
-	modelIndex      map[string]Provider
+	modelIndex      map[string]string
 	defaultProvider string
 }
 
@@ -80,7 +81,7 @@ type Service struct {
 func NewService(providers map[string]Provider, defaultName string) *Service {
 	s := &Service{
 		providers:       make(map[string]Provider, len(providers)),
-		modelIndex:      make(map[string]Provider),
+		modelIndex:      make(map[string]string),
 		defaultProvider: defaultName,
 	}
 	// 先按 Provider 名（map key）字典序排序，保证 modelIndex 的构建顺序
@@ -102,7 +103,7 @@ func NewService(providers map[string]Provider, defaultName string) *Service {
 		s.providers[k] = p
 		for _, m := range p.SupportedModels() {
 			if _, exists := s.modelIndex[m]; !exists {
-				s.modelIndex[m] = p
+				s.modelIndex[m] = k
 			}
 		}
 	}
@@ -110,39 +111,90 @@ func NewService(providers map[string]Provider, defaultName string) *Service {
 }
 
 func (s *Service) resolveProvider(name, model string) Provider {
+	_, p := s.resolveRoute(name, model)
+	return p
+}
+
+// resolveRoute 同时保留注册身份，不通过供应商名称反查实例。
+func (s *Service) resolveRoute(name, model string) (string, Provider) {
 	if name != "" {
 		if p, ok := s.providers[name]; ok {
-			return p
+			return name, p
 		}
 	}
 	if model != "" {
-		if p, ok := s.modelIndex[model]; ok {
-			return p
+		if key, ok := s.modelIndex[model]; ok {
+			return key, s.providers[key]
 		}
 	}
 	if s.defaultProvider != "" {
-		return s.providers[s.defaultProvider]
+		return s.defaultProvider, s.providers[s.defaultProvider]
 	}
-	return nil
+	return "", nil
+}
+
+const taskReferencePrefix = "aicore-video-v1:"
+
+// wrapTaskID 对别名和歧义名称使用无分隔符冲突的版本化引用。
+func (s *Service) wrapTaskID(key string, p Provider, raw string) string {
+	legacy := key == p.Name() && !strings.Contains(key, "::")
+	candidate := key + "::" + raw
+	for otherKey, other := range s.providers {
+		if otherKey != key && (strings.HasPrefix(candidate, otherKey+"::") || strings.HasPrefix(candidate, other.Name()+"::")) {
+			legacy = false
+		}
+	}
+	if legacy {
+		return candidate
+	}
+	return taskReferencePrefix + base64.RawURLEncoding.EncodeToString([]byte(key)) + ":" + base64.RawURLEncoding.EncodeToString([]byte(raw))
 }
 
 // resolveByTaskID 反查任务所属 Provider。
 //
-// 任务 ID 由 Service 在 Submit 后包装为 "{providerName}::{rawTaskID}"，
-// Poll 时解析回原 Provider，确保前端不需要记忆 Provider。
+// 新任务使用无歧义的旧格式或版本化引用；历史引用仅在唯一匹配时解析。
+// Poll 时解析回原 Provider，调用方应将任务引用作为不透明字符串保存。
 func (s *Service) resolveByTaskID(taskID string) (Provider, string, error) {
-	name, raw, ok := strings.Cut(taskID, "::")
-	if !ok {
+	if strings.HasPrefix(taskID, taskReferencePrefix) && !strings.Contains(taskID, "::") {
+		keyPart, rawPart, ok := strings.Cut(strings.TrimPrefix(taskID, taskReferencePrefix), ":")
+		key, keyErr := base64.RawURLEncoding.DecodeString(keyPart)
+		raw, rawErr := base64.RawURLEncoding.DecodeString(rawPart)
+		if !ok || keyErr != nil || rawErr != nil || len(key) == 0 || len(raw) == 0 {
+			return nil, "", fmt.Errorf("invalid video task reference")
+		}
+		p, found := s.providers[string(key)]
+		if !found {
+			return nil, "", fmt.Errorf("unknown video provider instance %q", key)
+		}
+		return p, string(raw), nil
+	}
+	if !strings.Contains(taskID, "::") {
 		return nil, "", fmt.Errorf("任务 ID 格式错误（缺少 provider 前缀）")
 	}
-	p, known := s.providers[name]
-	if !known {
-		return nil, "", fmt.Errorf("未知 Provider %q", name)
+	var found Provider
+	var rawID string
+	for key, p := range s.providers {
+		seenPrefix := make(map[string]bool, 2)
+		for _, prefix := range []string{key, p.Name()} {
+			if seenPrefix[prefix] {
+				continue
+			}
+			seenPrefix[prefix] = true
+			if raw, ok := strings.CutPrefix(taskID, prefix+"::"); ok {
+				if found != nil {
+					return nil, "", fmt.Errorf("ambiguous legacy video task reference")
+				}
+				found, rawID = p, raw
+			}
+		}
 	}
-	return p, raw, nil
+	if found == nil {
+		return nil, "", fmt.Errorf("unknown video provider in task reference")
+	}
+	return found, rawID, nil
 }
 
-// Submit 提交生成任务。返回带 Provider 前缀的任务 ID（"{provider}::{rawID}"）。
+// Submit 提交生成任务，返回绑定注册实例的不透明任务引用，供 Poll 原样使用。
 func (s *Service) Submit(ctx context.Context, providerName string, req Request) (string, error) {
 	// 规范化输入：纯空白字符（含 Tab/换行/全角空格 U+3000）的 prompt 视同空，
 	// 不能绕过校验向上游发请求（浪费配额、可能触发风控）。
@@ -150,7 +202,7 @@ func (s *Service) Submit(ctx context.Context, providerName string, req Request) 
 	if strings.TrimSpace(req.Prompt) == "" && strings.TrimSpace(req.ImageURL) == "" {
 		return "", fmt.Errorf("prompt 与 image_url 至少需要一个有效（非空白）值")
 	}
-	p := s.resolveProvider(providerName, req.Model)
+	key, p := s.resolveRoute(providerName, req.Model)
 	if p == nil {
 		return "", fmt.Errorf("未找到可用的视频生成 Provider（请求 provider=%q model=%q）", providerName, req.Model)
 	}
@@ -158,7 +210,7 @@ func (s *Service) Submit(ctx context.Context, providerName string, req Request) 
 	if err != nil {
 		return "", err
 	}
-	return p.Name() + "::" + rawID, nil
+	return s.wrapTaskID(key, p, rawID), nil
 }
 
 // Poll 查询任务状态。
