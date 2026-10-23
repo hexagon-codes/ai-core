@@ -188,6 +188,14 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 	}
 	// 默认请求 base64 直接内嵌，避免依赖外部 URL 寿命；前端按需自行选择展示
 	body.ResponseFormat = "b64_json"
+	// GPT Image 原生返回base64，不接受旧图片接口的response_format和style字段。
+	if strings.HasPrefix(model, "gpt-image-") || model == "chatgpt-image-latest" {
+		body.ResponseFormat = ""
+		if body.Style != "" {
+			body.Prompt += "\nImage style: " + body.Style
+			body.Style = ""
+		}
+	}
 
 	payload, err := json.Marshal(body)
 	if err != nil {
