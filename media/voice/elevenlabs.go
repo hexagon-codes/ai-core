@@ -126,10 +126,10 @@ func (t *ElevenLabsTTS) Capabilities() []catalog.Capability {
 
 func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesizeResult, error) {
 	if t.apiKey == "" {
-		return nil, fmt.Errorf("elevenlabs: 未配置 API Key")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("elevenlabs: 未配置 API Key")}
 	}
 	if strings.TrimSpace(text) == "" {
-		return nil, fmt.Errorf("elevenlabs: text empty")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("elevenlabs: text empty")}
 	}
 	voice := strings.TrimSpace(opts.Voice)
 	if voice == "" {
@@ -149,7 +149,7 @@ func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string, opts Synthe
 	}
 	payload, err := json.Marshal(body)
 	if err != nil {
-		return nil, fmt.Errorf("elevenlabs: marshal request: %w", err)
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("elevenlabs: marshal request: %w", err)}
 	}
 	resp, err := transport.Do(ctx, transport.Request{
 		Provider:  t.Name(),

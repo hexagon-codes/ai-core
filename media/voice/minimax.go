@@ -110,10 +110,10 @@ func (t *MiniMaxTTS) SupportedFormats() []AudioFormat {
 // Synthesize 调用 T2A v2 接口合成语音。
 func (t *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesizeResult, error) {
 	if t.apiKey == "" || t.groupID == "" {
-		return nil, fmt.Errorf("minimax: apiKey/groupID 未配置")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("minimax: apiKey/groupID 未配置")}
 	}
 	if strings.TrimSpace(text) == "" {
-		return nil, fmt.Errorf("minimax: text empty")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("minimax: text empty")}
 	}
 
 	voiceID := strings.TrimSpace(opts.Voice)
@@ -185,7 +185,11 @@ func (t *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts Synthesiz
 		return nil, fmt.Errorf("minimax: parse: %w body=%s", err, string(respBody))
 	}
 	if parsed.BaseResp.StatusCode != 0 {
-		return nil, fmt.Errorf("minimax: api error %d: %s", parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg)
+		err := fmt.Errorf("minimax: api error %d: %s", parsed.BaseResp.StatusCode, parsed.BaseResp.StatusMsg)
+		if parsed.BaseResp.StatusCode == 1004 {
+			return nil, &definitiveSynthesisError{cause: err}
+		}
+		return nil, err
 	}
 	if parsed.Data.Audio == "" {
 		return nil, fmt.Errorf("minimax: empty audio in response")

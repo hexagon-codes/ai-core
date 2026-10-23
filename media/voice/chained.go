@@ -14,8 +14,11 @@ package voice
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
+
+	"github.com/hexagon-codes/ai-core/transport"
 )
 
 // ChainedTTS 把多个 TTSProvider 按优先级串联。
@@ -134,13 +137,32 @@ func (c *ChainedTTS) Synthesize(ctx context.Context, text string, opts Synthesiz
 	if len(c.providers) == 0 {
 		return nil, fmt.Errorf("chained-tts: no providers configured")
 	}
-	var errs []string
+	var errs []error
 	for _, p := range c.providers {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
 		res, err := p.Synthesize(ctx, text, opts)
 		if err == nil {
+			if res != nil {
+				copyResult := *res
+				if copyResult.Provider == "" {
+					copyResult.Provider = p.Name()
+				}
+				return &copyResult, nil
+			}
 			return res, nil
 		}
-		errs = append(errs, fmt.Sprintf("%s: %v", p.Name(), err))
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || ctx.Err() != nil {
+			return nil, err
+		}
+		// 标记为不可重放的操作，仅在明确拒绝时保留原配置的回退。
+		if transport.OperationSafetyFromContext(ctx) == transport.OperationSafetyNonIdempotent {
+			if !IsDefinitiveSynthesisFailure(err) {
+				return nil, fmt.Errorf("chained-tts: %s result unknown: %w", p.Name(), err)
+			}
+		}
+		errs = append(errs, fmt.Errorf("%s: %w", p.Name(), err))
 	}
-	return nil, fmt.Errorf("chained-tts: all providers failed: %s", strings.Join(errs, "; "))
+	return nil, &synthesisFailures{causes: errs}
 }

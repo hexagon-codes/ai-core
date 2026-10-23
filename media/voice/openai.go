@@ -323,7 +323,7 @@ func (t *OpenAITTS) Voices() []VoiceInfo {
 //   - error: 请求失败时返回错误
 func (t *OpenAITTS) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesizeResult, error) {
 	if text == "" {
-		return nil, fmt.Errorf("文本内容为空")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("文本内容为空")}
 	}
 
 	// 设置默认值

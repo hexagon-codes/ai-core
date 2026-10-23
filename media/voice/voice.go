@@ -116,6 +116,7 @@ type SynthesizeOptions struct {
 
 // SynthesizeResult TTS 合成结果
 type SynthesizeResult struct {
+	Provider  string      `json:"provider,omitempty"`   // 实际成功的供应商
 	Audio     []byte      `json:"-"`                    // 音频数据
 	Format    AudioFormat `json:"format"`               // 输出格式
 	Duration  float64     `json:"duration"`             // 音频时长（秒）

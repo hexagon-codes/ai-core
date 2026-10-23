@@ -239,7 +239,7 @@ func (t *AzureTTS) Voices() []VoiceInfo {
 
 func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeOptions) (*SynthesizeResult, error) {
 	if text == "" {
-		return nil, fmt.Errorf("文本内容为空")
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("文本内容为空")}
 	}
 
 	voice := opts.Voice
