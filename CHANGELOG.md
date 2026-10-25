@@ -4,13 +4,26 @@
 
 ## [Unreleased]
 
+## [0.2.13] - 2026-10-25
+
+### Added
+- `media/voice`：`SynthesizeResult.Provider` 可标识串联合成的实际成功 Provider；新增 `IsDefinitiveSynthesisFailure`，供调用方判断合成是否已明确未被接纳。
+
+### Changed
+- `media/video`：`Service.Submit` 返回绑定 Provider 注册实例的不透明任务引用；调用方应原样保存并传给 `Poll`。旧 `{provider}::{taskID}` 引用仅在能唯一解析时继续接受；`SubmitAndWait` 首次轮询失败时保留已提交的 `TaskID`。
+- `media/voice`：标记为不可重放的合成请求仅在明确拒绝时回退到下一 Provider；结果未知、取消或超时时停止回退。合成结果会保留实际成功的 Provider。
+- `media/voice`：Edge TTS `Sec-MS-GEC` token 更新为 v2 协议格式。
+
+### Fixed
+- `media/image`：原生 GPT Image 模型请求不再发送不支持的 `response_format` 和 `style` 字段；指定的风格会保留在 prompt 中，旧版图像接口请求保持原样。
+
+## [0.2.12] - 2026-10-21
+
 ### Changed
 - CI/CD 收敛为单一 PR `Verify` 工作流，只验证本公共库可控的格式、依赖、静态检查与测试不变量。
 - 安全扫描与公开 API 兼容性检查移至独立的 `Security Audit` 与 `Release Preflight`，不再阻断普通代码变更。
 - 版本来源统一以 Git tag 为准，移除重复的 `VERSION` 版本源及其精确绑定校验。
 - 移除 `main` push 的重复执行，合并前由 PR `Verify` 完成校验。
-
-## [0.2.12] - 2026-10-21
 
 ### Fixed
 - `streamx` / `llm`：OpenAI 流式响应的输入、输出与总 Token 用量通过可选的 `Chunk.Usage` 传递到最终结果；保留最后一份累计快照，支持空 `choices` 统计帧，避免重复帧被重复累加或后续无用量帧清空统计。

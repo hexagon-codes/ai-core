@@ -17,6 +17,8 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - Network policy 默认不启用，以保持本地服务与私有兼容网关的向后兼容；显式传入零值 `NetworkPolicy` 时启用 public HTTPS 策略。
 - `llm.Provider` / `llm.TokenCounter` 保留既有 `CountTokens` 方法集；可取消计数通过 opt-in 的 `llm.ContextTokenCounter` 提供。`llm.CountTokensContext` 对旧实现仅保证调用前检查 context，旧同步调用开始后无法被强制取消；健康检查会跳过旧实现并保留既有健康状态。
 - `streamx.Chunk.Usage` 是可选的单请求累计用量快照，nil 表示该帧未报告用量。OpenAI 格式的 `streamx.Result.Usage` 保留最后一份已报告快照，空 `choices` 的统计帧有效；调用方不得将同一次请求的快照逐帧累加，不同请求的结果仍可累加。
+- `media/video.Service.Submit` 返回的不透明任务引用必须原样传入 `Poll`，调用方不得依赖其内部编码。`Poll` 继续接受可唯一解析的历史 `{provider}::{taskID}` 引用；存在歧义的旧引用会返回错误。提交成功后首次轮询失败时，`SubmitAndWait` 返回状态仍包含可恢复的 `TaskID`。
+- `media/voice.ChainedTTS` 在 context 标记 `transport.OperationSafetyNonIdempotent` 时，仅对明确未被接纳的合成失败执行 Provider 回退；结果未知时停止，避免重复执行可能已接纳的请求。取消和超时也不会触发回退。`SynthesizeResult.Provider` 与 `IsDefinitiveSynthesisFailure` 为新增的兼容性 API。
 
 ## CI/CD 边界与门禁
 

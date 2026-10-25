@@ -4,7 +4,7 @@
 
 An open-source AI foundation library for any Go application or agent framework, with unified model, tool, memory, streaming, and media abstractions.
 
-> Documentation version: **v0.2.12** ([changes](CHANGELOG.md#0212---2026-10-21)).
+> Documentation version: **v0.2.13** ([changes](CHANGELOG.md#0213---2026-10-25)).
 
 ## Features
 
@@ -228,6 +228,8 @@ fmt.Println(status.VideoURL)
 
 Billing-sensitive Submit calls are retried automatically only when `IdempotencyKey` is set, avoiding duplicate task creation and duplicate billing after ambiguous 5xx/network failures. Async image providers can use `media/image.SubmitAndWait`; video providers can use `Service.SubmitAndWait`.
 
+Treat the opaque reference returned by `Service.Submit` as a value and pass it unchanged to `Poll`; do not parse or reconstruct the provider prefix or upstream task ID.
+
 ### Capability Catalog And Network Policy
 
 ```go
@@ -342,7 +344,7 @@ multi := memory.NewMultiLayerMemory(
 
 | Modality | Provider | Model / Channel Examples | Notes |
 |----------|----------|--------------------------|-------|
-| Image | OpenAI / Zhipu / OpenAI-compatible | DALL-E, gpt-image-1, CogView, self-hosted compatible gateways | Synchronous generation |
+| Image | OpenAI / Zhipu / OpenAI-compatible | DALL-E, GPT Image, CogView, self-hosted compatible gateways | Synchronous generation |
 | Image | BFL FLUX | flux-pro-1.1, flux-pro-1.1-ultra, flux-kontext-* | Official async Submit→Poll |
 | Image | Async compatible | Midjourney-compatible, Ideogram, Recraft, Stability, enterprise proxies | Compliant gateway Submit→Poll |
 | Video | Seedance / Doubao CN | doubao-seedance-*, Volcengine Ark China region | Official async Submit→Poll |

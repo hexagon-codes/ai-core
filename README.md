@@ -4,7 +4,7 @@
 
 面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库，提供统一的模型、工具、记忆、流式与媒体抽象。
 
-> 文档对应版本：**v0.2.12**（[变更记录](CHANGELOG.md#0212---2026-10-21)）。
+> 文档对应版本：**v0.2.13**（[变更记录](CHANGELOG.md#0213---2026-10-25)）。
 
 ## 特性
 
@@ -227,6 +227,8 @@ fmt.Println(status.VideoURL)
 
 计费型 Submit 请求只有在设置 `IdempotencyKey` 时才启用自动重试，避免上游 5xx/网络抖动场景下重复创建任务和重复计费。图像异步 Provider 可使用 `media/image.SubmitAndWait`，视频 Provider 可使用 `Service.SubmitAndWait`。
 
+`Service.Submit` 返回的不透明任务引用应原样传给 `Poll`，不要拆分或重建 Provider 前缀和上游任务 ID。
+
 ### 能力矩阵与网络策略
 
 ```go
@@ -340,7 +342,7 @@ multi := memory.NewMultiLayerMemory(
 
 | Modality | Provider | 模型 / 通道示例 | 说明 |
 |---|---|---|---|
-| 图像 | OpenAI / Zhipu / OpenAI-compatible | DALL-E、gpt-image-1、CogView、自托管兼容网关 | 同步生成 |
+| 图像 | OpenAI / Zhipu / OpenAI-compatible | DALL-E、GPT Image、CogView、自托管兼容网关 | 同步生成 |
 | 图像 | BFL FLUX | flux-pro-1.1、flux-pro-1.1-ultra、flux-kontext-* | 官方异步 Submit→Poll |
 | 图像 | Async compatible | Midjourney-compatible、Ideogram、Recraft、Stability、企业代理 | 合规网关 Submit→Poll |
 | 视频 | Seedance / Doubao 国内 | doubao-seedance-*，火山方舟中国区 | 官方异步 Submit→Poll |
