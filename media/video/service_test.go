@@ -65,6 +65,14 @@ func TestService_LegacyTaskReferenceRejectsAmbiguousInstance(t *testing.T) {
 	}
 }
 
+func TestService_LegacyTaskReferenceRejectsSameInstancePrefixAmbiguity(t *testing.T) {
+	p := &mockVideoProvider{name: "x", models: []string{"m"}}
+	svc := NewService(map[string]Provider{"x::part": p}, "x::part")
+	if _, err := svc.Poll(t.Context(), "x::part::123"); err == nil || p.lastRawID != "" {
+		t.Fatalf("ambiguous legacy reference reached a task: error=%v raw=%s", err, p.lastRawID)
+	}
+}
+
 func TestService_SubmitAndWaitKeepsTaskOnFirstPollError(t *testing.T) {
 	want := errors.New("temporary poll failure")
 	p := &mockVideoProvider{name: "x", submitID: "created", pollErr: want}
