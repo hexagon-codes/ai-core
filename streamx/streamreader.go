@@ -872,6 +872,9 @@ func (br *bufferReader[T]) fill() {
 		default:
 			item, err := br.source.Recv()
 			if err != nil {
+				if _, sourceEOF := IsSourceEOF(err); sourceEOF {
+					continue
+				}
 				br.err = err
 				return
 			}
@@ -963,7 +966,7 @@ func (tr *timeoutReader[T]) init() {
 				case <-done:
 					return
 				}
-				if err != nil {
+				if _, sourceEOF := IsSourceEOF(err); err != nil && !sourceEOF {
 					return
 				}
 			}
