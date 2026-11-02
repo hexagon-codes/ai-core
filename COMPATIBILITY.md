@@ -32,6 +32,13 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 
 ## 精确Schema与合流适配
 
+- `Schema.Of`识别标准JSON表示：`json.Number`为number，`json.RawMessage`为任意JSON，字节切片为base64字符串或null；`json:",string"`的基本类型字段及enum/default按实际JSON字符串表示生成。contentEncoding是标准Schema注解，不等于自动启用内容断言；任意自定义Marshaler不自动推断。需要更窄的供应商原生约束时由调用者显式提供Schema。
+- 越界的integer/number enum/default标签保留为`json.Number`，不截断、不改变为字符串，也不把配置值钳制为Go类型上限。Schema数字表示和解码到具体Go类型的范围检查仍是两个合同；无效类型范围由实际Go解码报错。
+- Backpressure、Debounce与Buffer/Timeout采用一致的SourceEOF语义；Debounce在源完成时立即刷新最后值，真实上游错误在已产生的值之后返回。消费者Close释放源和内部等待，不用正常EOF掩盖失败。
+- `PipeWithClose`的回调仍只调用一次；panic转换为含栈的`ClosePanicError`并保留原始error因果链。`Collect`返回已读取的值并合并关闭错误，该类清理失败不可触发整次读取的自动重放；Merge/Zip保留所有输入的关闭错误。Close回调仍不得等待当前读取回调自身结束。
+- Pipe支持Send与写端Close并发：关闭会唤醒阻塞发送，已缓冲值仍可读完；首次Close/CloseWithError确定终态，后续关闭不覆盖原错误，CloseWithError(nil)等同Close。Zip在右源发出非终态SourceEOF时保留未配对的左值，下一次继续读取右源。
+- 库创建的Copy、Buffer、Timeout、Backpressure、Debounce后台读取通过`SourcePanicError`返回用户读取/映射/观察回调的异常，不让panic逃逸为进程退出。该错误保留Value/Stack与原error因果链并标记不可重放；调用者同步执行的普通回调仍遵守对应API自身合同。
+
 - `schema.Of` 的静态数值 min/max 标签写入精确 Number 字段；超出本机 int 范围但可表示为 uint64 的 integer enum/default 保留数字字面量，不退回字符串。`time.Time` 及其指针生成 `string`、`format: date-time`，与 Go JSON 表示一致；自定义 MarshalJSON 类型不据此获得自动推断承诺，format 验证仍依赖 Validator 配置。
 
 - `Schema.MinimumNumber` / `MaximumNumber` 为可选 `json.Number`，非空时优先于既有 `*float64` 字段；JSON解码保留原始数值字面量，同时为可表示的旧字段提供近似读数。需要改写下界/上界时同步修改或清空相应Number字段，不能只改近似字段。JSON线上仍为数字。

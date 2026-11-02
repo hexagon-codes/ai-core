@@ -31,6 +31,11 @@
 
 ### Fixed
 
+- `schema.Of`：按标准 JSON 表示生成 `json.Number`、`json.RawMessage`、字节切片及 `json:",string"` 字段；字节切片保留字符串/null表示，RawMessage允许任意JSON。整数或数值标签超出基础解析范围时保留数字字面量，不退化为字符串。
+- `streamx`：Backpressure与Debounce继续读取SourceEOF后的源；Debounce传播实际错误，接收新值时重置窗口，源完成时立即输出最后值，关闭可终止等待。
+- `streamx`：关闭回调panic返回含栈、不可重放的`ClosePanicError`；Collect保留已读值及清理错误，Merge/Zip传递各输入的关闭失败。Pipe只发布首次终态，关闭先唤醒发送者再关闭数据通道，避免混合错误类型及Send/Close竞态；Zip在右源SourceEOF期间保留已取得的左值。
+- `streamx`：Copy、Buffer、Timeout、Backpressure、Debounce后台读取的源回调异常转换为`SourcePanicError`，保留原因、栈及不可重放标记；Backpressure后台观察回调采用相同失败边界。
+
 - `schema.Of`：静态 min/max 标签同步写入精确数值字段，uint64 最大值枚举保留数字类型；`time.Time` 及其指针按 JSON 的 `string/date-time` 表示生成 Schema，避免合法时间被内部结构类型拒绝。
 
 - `schema`：增加可选精确上下界数值字段，JSON往返保留Enum/Default中的大整数；非nil空枚举与组合约束不再被省略。
