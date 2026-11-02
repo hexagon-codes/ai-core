@@ -67,6 +67,10 @@ type Capability struct {
 	Stable      bool   `json:"stable,omitempty"`
 	OfficialAPI bool   `json:"official_api,omitempty"`
 	Source      string `json:"source,omitempty"`
+	// Evidence 标记能力条目的证据性质；declared不表示端点已实测。
+	Evidence string `json:"evidence,omitempty"`
+	// EndpointSource 区分profile原端点与调用方配置的端点，不包含认证或完整地址。
+	EndpointSource string `json:"endpoint_source,omitempty"`
 
 	Cost Cost `json:"cost,omitempty"`
 }

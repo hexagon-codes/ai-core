@@ -55,20 +55,21 @@ type Provider struct {
 type Option func(*config)
 
 type config struct {
-	name          string
-	apiKey        string
-	baseURL       string
-	defaultModel  string
-	models        []ModelSpec
-	httpClient    *http.Client
-	headers       map[string]string
-	requestTO     time.Duration
-	streamIdleTO  time.Duration
-	networkPolicy *llm.NetworkPolicy
-	source        string
-	official      bool
-	stable        bool
-	region        string
+	name           string
+	apiKey         string
+	baseURL        string
+	defaultModel   string
+	models         []ModelSpec
+	httpClient     *http.Client
+	headers        map[string]string
+	requestTO      time.Duration
+	streamIdleTO   time.Duration
+	networkPolicy  *llm.NetworkPolicy
+	source         string
+	official       bool
+	stable         bool
+	region         string
+	profileBaseURL string
 }
 
 // WithBaseURL sets the OpenAI-compatible base URL.
@@ -139,11 +140,9 @@ func WithRegion(region string) Option {
 // New creates a named OpenAI-compatible Provider.
 func New(name, apiKey string, opts ...Option) *Provider {
 	cfg := &config{
-		name:     strings.TrimSpace(name),
-		apiKey:   apiKey,
-		baseURL:  defaultBaseURL,
-		official: true,
-		stable:   true,
+		name:    strings.TrimSpace(name),
+		apiKey:  apiKey,
+		baseURL: defaultBaseURL,
 	}
 	if cfg.name == "" {
 		cfg.name = "openai-compatible"
@@ -155,6 +154,19 @@ func New(name, apiKey string, opts ...Option) *Provider {
 	}
 	if cfg.defaultModel == "" && len(cfg.models) > 0 {
 		cfg.defaultModel = cfg.models[0].ID
+	}
+	// 模型目录只描述显式声明或配置；兼容传输不构成OpenAI模型清单的证明。
+	if cfg.defaultModel != "" {
+		found := false
+		for _, model := range cfg.models {
+			found = found || model.ID == cfg.defaultModel
+		}
+		if !found {
+			cfg.models = append(cfg.models, ModelSpec{ID: cfg.defaultModel})
+		}
+	}
+	if cfg.profileBaseURL == "" || cfg.baseURL != strings.TrimRight(cfg.profileBaseURL, "/") {
+		cfg.official, cfg.stable = false, false
 	}
 	openAIOpts := []openai.Option{
 		openai.WithBaseURL(cfg.baseURL),
@@ -202,6 +214,7 @@ func NewProfile(profileName, apiKey string, opts ...Option) (*Provider, error) {
 			c.official = profile.Official
 			c.stable = profile.Stable
 			c.region = profile.Region
+			c.profileBaseURL = profile.BaseURL
 		},
 	}
 	profileOpts = append(profileOpts, opts...)
@@ -219,9 +232,6 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*llm.
 }
 
 func (p *Provider) Models() []llm.ModelInfo {
-	if len(p.models) == 0 {
-		return p.inner.Models()
-	}
 	out := make([]llm.ModelInfo, 0, len(p.models))
 	for _, m := range p.models {
 		out = append(out, llm.ModelInfo{
@@ -264,6 +274,10 @@ func capabilitiesFromSpecs(c *config) []catalog.Capability {
 		return nil
 	}
 	rows := make([]catalog.Capability, 0, len(c.models))
+	endpointSource := "configured"
+	if c.profileBaseURL != "" && c.baseURL == strings.TrimRight(c.profileBaseURL, "/") {
+		endpointSource = "profile"
+	}
 	for _, m := range c.models {
 		if strings.TrimSpace(m.ID) == "" {
 			continue
@@ -273,15 +287,17 @@ func capabilitiesFromSpecs(c *config) []catalog.Capability {
 			features = append(features, "region:"+c.region)
 		}
 		rows = append(rows, catalog.Capability{
-			Provider:      c.name,
-			Model:         m.ID,
-			Name:          firstNonEmpty(m.Name, m.ID),
-			Modality:      catalog.ModalityText,
-			Features:      features,
-			ContextWindow: m.MaxTokens,
-			Stable:        c.stable,
-			OfficialAPI:   c.official,
-			Source:        c.source,
+			Provider:       c.name,
+			Model:          m.ID,
+			Name:           firstNonEmpty(m.Name, m.ID),
+			Modality:       catalog.ModalityText,
+			Features:       features,
+			ContextWindow:  m.MaxTokens,
+			Stable:         c.stable,
+			OfficialAPI:    c.official,
+			Source:         c.source,
+			Evidence:       "declared",
+			EndpointSource: endpointSource,
 			Cost: catalog.Cost{
 				InputPerMillionTokens:  m.InputCost,
 				OutputPerMillionTokens: m.OutputCost,
