@@ -2,6 +2,7 @@
 package anthropic
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -134,7 +135,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	body, systemPrompt, err := p.buildRequestBody(req, false)
+	body, _, err := p.buildRequestBody(req, false)
 	if err != nil {
 		return nil, err
 	}
@@ -150,7 +151,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	parsed := p.parseResponse(&result, systemPrompt)
+	parsed := p.parseResponse(&result, req.Model)
 	if explicitReasoning {
 		receipt := reasoningReceipt.WithEvidence(true, anthropicResponseHasReasoning(&result), 0)
 		parsed.ReasoningReceipt = &receipt
@@ -186,6 +187,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		base:     &streamx.ClaudeParser{},
 		close:    resp.Body.Close,
 		metadata: req.Metadata,
+		provider: p, model: req.Model,
 	}
 	if explicitReasoning {
 		parser.receipt = reasoningReceipt.WithEvidence(true, false, 0)
@@ -304,6 +306,7 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	// 分离系统消息和用户消息
 	var systemPrompt string
 	var messages []map[string]any
+	previousWasTool := false
 
 	for _, msg := range req.Messages {
 		if msg.Role == llm.RoleSystem {
@@ -316,13 +319,25 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 			"role": convertRole(msg.Role),
 		}
 
-		content, err := anthropicMessageContent(msg)
+		content, matched, err := p.continuationContent(req.Model, msg)
+		if err != nil {
+			return nil, systemPrompt, err
+		}
+		if !matched {
+			content, err = anthropicMessageContent(msg)
+		}
 		if err != nil {
 			return nil, systemPrompt, err
 		}
 		m["content"] = content
 
-		messages = append(messages, m)
+		if previousWasTool && m["role"] == "user" && len(messages) > 0 {
+			last := messages[len(messages)-1]
+			last["content"] = append(last["content"].([]map[string]any), content...)
+		} else {
+			messages = append(messages, m)
+		}
+		previousWasTool = msg.Role == llm.RoleTool
 	}
 
 	payload := map[string]any{
@@ -347,6 +362,23 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 	if len(req.Stop) > 0 {
 		payload["stop_sequences"] = req.Stop
 	}
+	if req.User != "" {
+		payload["metadata"] = map[string]any{"user_id": req.User}
+	}
+	if req.ResponseFormat != nil {
+		switch req.ResponseFormat.Type {
+		case "", "text":
+		case "json_schema":
+			if req.ResponseFormat.JSONSchema == nil || req.ResponseFormat.JSONSchema.Schema == nil {
+				return nil, systemPrompt, fmt.Errorf("anthropic: json_schema response format requires a schema")
+			}
+			payload["output_config"] = map[string]any{"format": map[string]any{"type": "json_schema", "schema": req.ResponseFormat.JSONSchema.Schema}}
+		case "json_object":
+			return nil, systemPrompt, fmt.Errorf("anthropic: json_object has no equivalent native guarantee; use json_schema or an explicit prompt strategy")
+		default:
+			return nil, systemPrompt, fmt.Errorf("anthropic: unsupported response format %q", req.ResponseFormat.Type)
+		}
+	}
 	if thinking, _, explicit, err := anthropicReasoningConfig(req.Metadata); err != nil {
 		return nil, systemPrompt, err
 	} else if explicit {
@@ -365,12 +397,71 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest, stream bool) ([]b
 		}
 		payload["tools"] = tools
 	}
+	choice, err := anthropicToolChoice(req.ToolChoice)
+	if err != nil {
+		return nil, systemPrompt, err
+	}
+	if choice != nil {
+		payload["tool_choice"] = choice
+	}
 
 	body, err := json.Marshal(payload)
 	return body, systemPrompt, err
 }
 
 func anthropicMessageContent(msg llm.Message) ([]map[string]any, error) {
+	blocks, err := anthropicBaseMessageContent(msg)
+	if err != nil {
+		return nil, err
+	}
+	if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
+		if msg.Content == "" && !msg.HasMultiContent() {
+			blocks = nil
+		}
+		for _, call := range msg.ToolCalls {
+			input := make(map[string]any)
+			if call.Arguments != "" {
+				decoder := json.NewDecoder(bytes.NewBufferString(call.Arguments))
+				decoder.UseNumber()
+				if err := decoder.Decode(&input); err != nil {
+					return nil, fmt.Errorf("anthropic: invalid assistant tool arguments: %w", err)
+				}
+			}
+			blocks = append(blocks, map[string]any{"type": "tool_use", "id": call.ID, "name": call.Name, "input": input})
+		}
+	}
+	if msg.Role == llm.RoleTool {
+		if msg.ToolCallID == "" {
+			return nil, fmt.Errorf("anthropic: tool result requires a tool call ID")
+		}
+		if msg.HasMultiContent() && msg.Content != "" {
+			found := false
+			for _, block := range blocks {
+				if block["type"] == "text" && block["text"] == msg.Content {
+					found = true
+					break
+				}
+			}
+			if !found {
+				blocks = append([]map[string]any{{"type": "text", "text": msg.Content}}, blocks...)
+			}
+		}
+		if msg.Content == "" && !msg.HasMultiContent() {
+			blocks = nil
+		}
+		result := map[string]any{"type": "tool_result", "tool_use_id": msg.ToolCallID}
+		if len(blocks) > 0 {
+			result["content"] = blocks
+		}
+		if msg.ToolResultError {
+			result["is_error"] = true
+		}
+		return []map[string]any{result}, nil
+	}
+	return blocks, nil
+}
+
+func anthropicBaseMessageContent(msg llm.Message) ([]map[string]any, error) {
 	if !msg.HasMultiContent() {
 		return []map[string]any{
 			{"type": "text", "text": msg.Content},
@@ -495,12 +586,13 @@ type anthropicResponse struct {
 }
 
 type anthropicContent struct {
-	Type     string `json:"type"`
-	Text     string `json:"text,omitempty"`
-	Thinking string `json:"thinking,omitempty"`
-	ID       string `json:"id,omitempty"`
-	Name     string `json:"name,omitempty"`
-	Input    any    `json:"input,omitempty"`
+	RawJSON  json.RawMessage `json:"-"`
+	Type     string          `json:"type"`
+	Text     string          `json:"text,omitempty"`
+	Thinking string          `json:"thinking,omitempty"`
+	ID       string          `json:"id,omitempty"`
+	Name     string          `json:"name,omitempty"`
+	Input    any             `json:"input,omitempty"`
 }
 
 func anthropicReasoningConfig(metadata map[string]any) (map[string]any, llm.ReasoningReceipt, bool, error) {
@@ -584,6 +676,9 @@ type anthropicReasoningStreamParser struct {
 	close    func() error
 	metadata map[string]any
 	receipt  llm.ReasoningReceipt
+	provider *Provider
+	model    string
+	native   anthropicNativeStream
 }
 
 func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
@@ -610,6 +705,9 @@ func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, err
 		}
 		return nil, fmt.Errorf("anthropic stream error: %s: %s", envelope.Error.Type, envelope.Error.Message)
 	}
+	if err := p.native.observe(data); err != nil {
+		return nil, err
+	}
 
 	chunk, err := p.base.Parse(data)
 	if err != nil || chunk == nil {
@@ -633,6 +731,13 @@ func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, err
 	if p.receipt.Version != 0 {
 		chunk.ReasoningEvidence = llm.ReasoningEvidenceMap(p.receipt)
 	}
+	if envelope.Type == "message_stop" && p.provider != nil && anthropicResumableStop(p.native.stopReason) {
+		output, err := p.native.output()
+		if err != nil {
+			return nil, err
+		}
+		chunk.ProviderContinuation = p.provider.continuation(p.model, output)
+	}
 	return chunk, nil
 }
 
@@ -641,7 +746,7 @@ func (p *anthropicReasoningStreamParser) IsDone(data []byte) bool {
 }
 
 // parseResponse 解析响应
-func (p *Provider) parseResponse(resp *anthropicResponse, _ string) *llm.CompletionResponse {
+func (p *Provider) parseResponse(resp *anthropicResponse, model string) *llm.CompletionResponse {
 	result := &llm.CompletionResponse{
 		ID:           resp.ID,
 		Model:        resp.Model,
@@ -670,6 +775,17 @@ func (p *Provider) parseResponse(resp *anthropicResponse, _ string) *llm.Complet
 				Arguments: string(args),
 			})
 		}
+	}
+	if anthropicResumableStop(resp.StopReason) {
+		var output []json.RawMessage
+		for _, block := range resp.Content {
+			raw := block.RawJSON
+			if len(raw) == 0 {
+				raw, _ = json.Marshal(block)
+			}
+			output = append(output, raw)
+		}
+		result.ProviderContinuation = p.continuation(model, output)
 	}
 
 	return result

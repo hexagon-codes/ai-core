@@ -4,7 +4,7 @@
 
 An open-source AI foundation library for any Go application or agent framework, with unified model, tool, memory, streaming, and media abstractions.
 
-> Documentation version: **v0.2.13** ([changes](CHANGELOG.md#0213---2026-10-25)).
+> Local delivery target: **v0.3.0** ([changes](CHANGELOG.md)), requiring Go 1.26.10 and Toolkit v0.3.7. This does not mean a tag has been created or pushed, or that a public Go module proxy can resolve the version.
 
 ## Features
 
@@ -24,8 +24,10 @@ An open-source AI foundation library for any Go application or agent framework, 
 ## Installation
 
 ```bash
-go get github.com/hexagon-codes/ai-core@latest
+go get github.com/hexagon-codes/ai-core@v0.3.0
 ```
+
+This command targets the planned release and requires a published tag and verified public module availability. An isolated, versioned local module proxy validates the candidate combination without proving public publication.
 
 ## Quick Start
 

@@ -4,7 +4,7 @@
 
 面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库，提供统一的模型、工具、记忆、流式与媒体抽象。
 
-> 文档对应版本：**v0.2.13**（[变更记录](CHANGELOG.md#0213---2026-10-25)）。
+> 本地交付目标：**v0.3.0**（[变更记录](CHANGELOG.md)），最低 Go 1.26.10、Toolkit v0.3.7。版本说明不代表已经创建或推送 tag，也不证明公共 Go module proxy 已可解析。
 
 ## 特性
 
@@ -24,8 +24,10 @@
 ## 安装
 
 ```bash
-go get github.com/hexagon-codes/ai-core@latest
+go get github.com/hexagon-codes/ai-core@v0.3.0
 ```
+
+此命令为目标版本的配套命令，在正式 tag 与公共代理可解析性核验完成后使用。本地版本化 module proxy 用于独立候选验证，其结果不能冒充公共版本已发布。
 
 ## 快速开始
 

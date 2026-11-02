@@ -2,6 +2,7 @@
 package gemini
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -238,6 +239,11 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest) ([]byte, error) {
 	// 转换消息格式
 	var contents []geminiContent
 	var systemInstruction *geminiContent
+	callNames := make(map[string]string)
+	declaredNames := make(map[string]bool, len(req.Tools))
+	for _, tool := range req.Tools {
+		declaredNames[tool.Function.Name] = true
+	}
 
 	for _, msg := range req.Messages {
 		if msg.Role == llm.RoleSystem {
@@ -250,10 +256,41 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest) ([]byte, error) {
 		// 工具结果消息：Gemini 没有独立 "tool" 角色，需转换为携带
 		// functionResponse part 的 user content，否则工具语义丢失（W3-53）。
 		if msg.Role == llm.RoleTool {
+			if name := callNames[msg.ToolCallID]; name != "" {
+				msg.Name = name
+			} else if msg.Name == "" {
+				if declaredNames[msg.ToolCallID] {
+					msg.Name, msg.ToolCallID = msg.ToolCallID, ""
+				} else {
+					return nil, fmt.Errorf("gemini: tool result requires its function name or matching call history")
+				}
+			}
 			contents = append(contents, geminiContent{
 				Role:  convertRole(msg.Role),
 				Parts: []geminiPart{{FunctionResponse: buildFunctionResponse(msg)}},
 			})
+			continue
+		}
+		if msg.Role == llm.RoleAssistant && len(msg.ToolCalls) > 0 {
+			var parts []geminiPart
+			if msg.Content != "" || msg.HasMultiContent() {
+				parts = buildParts(msg)
+			}
+			for _, call := range msg.ToolCalls {
+				args := make(map[string]any)
+				if call.Arguments != "" {
+					decoder := json.NewDecoder(bytes.NewBufferString(call.Arguments))
+					decoder.UseNumber()
+					if err := decoder.Decode(&args); err != nil {
+						return nil, fmt.Errorf("gemini: invalid assistant function arguments: %w", err)
+					}
+				}
+				parts = append(parts, geminiPart{FunctionCall: &geminiFunctionCall{ID: call.ID, Name: call.Name, Args: args}})
+				if call.ID != "" {
+					callNames[call.ID] = call.Name
+				}
+			}
+			contents = append(contents, geminiContent{Role: convertRole(msg.Role), Parts: parts})
 			continue
 		}
 
@@ -320,6 +357,14 @@ func (p *Provider) buildRequestBody(req llm.CompletionRequest) ([]byte, error) {
 		})
 		payload["tools"] = tools
 	}
+	choice, err := geminiToolChoice(req.ToolChoice)
+	if err != nil {
+		return nil, err
+	}
+	if choice != nil {
+		payload["toolConfig"] = map[string]any{"functionCallingConfig": choice}
+	}
+	// User 属于宿主追踪信息；GenerateContent 没有同义用户标识字段，不伪装为 labels。
 
 	return json.Marshal(payload)
 }
@@ -401,12 +446,17 @@ func parseDataURI(url string) (mimeType, data string, ok bool) {
 // buildFunctionResponse 将工具结果消息转换为 Gemini 的 functionResponse。
 //
 // Gemini 要求 functionResponse 含函数名与结构化 response 对象：
-//   - name 取自 msg.ToolCallID（关联到此前的工具调用）
+//   - name 是函数名，id 是独立调用身份；历史解析在请求构造时完成。
 //   - response 将工具返回内容包装为 {"content": <内容>} 对象
 func buildFunctionResponse(msg llm.Message) *geminiFunctionResponse {
+	response := map[string]any{"content": msg.Content}
+	if msg.ToolResultError {
+		response["error"] = msg.Content
+	}
 	return &geminiFunctionResponse{
-		Name:     msg.ToolCallID,
-		Response: map[string]any{"content": msg.Content},
+		ID:       msg.ToolCallID,
+		Name:     msg.Name,
+		Response: response,
 	}
 }
 
@@ -442,6 +492,7 @@ type geminiFileData struct {
 }
 
 type geminiFunctionCall struct {
+	ID   string         `json:"id,omitempty"`
 	Name string         `json:"name"`
 	Args map[string]any `json:"args"`
 }
@@ -450,6 +501,7 @@ type geminiFunctionCall struct {
 // Gemini 没有独立的 "tool" 角色，工具结果以 functionResponse part
 // 放入 role="user" 的 content 中回传。
 type geminiFunctionResponse struct {
+	ID string `json:"id,omitempty"`
 	// Name 关联的函数名
 	Name string `json:"name"`
 	// Response 工具返回内容，包装为对象（Gemini 要求 response 为结构化对象）
@@ -502,8 +554,12 @@ func (p *Provider) parseResponse(resp *geminiResponse, model string) *llm.Comple
 			}
 			if part.FunctionCall != nil {
 				args, _ := json.Marshal(part.FunctionCall.Args)
+				id := part.FunctionCall.ID
+				if id == "" {
+					id = "gemini_call_" + idgen.NanoID()
+				}
 				result.ToolCalls = append(result.ToolCalls, llm.ToolCall{
-					ID:        fmt.Sprintf("call_%s", part.FunctionCall.Name),
+					ID:        id,
 					Type:      "function",
 					Name:      part.FunctionCall.Name,
 					Arguments: string(args),

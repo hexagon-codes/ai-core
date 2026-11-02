@@ -2,10 +2,22 @@
 
 本文件记录 ai-core 的用户可见变更，遵循 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本遵循 [SemVer](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased]
+## v0.3.0（2026-11-02）
+
+本节对应本地代码交付目标；没有据此创建或推送 tag，公共 module proxy 的实际可解析性须在发布后单独核验。
+
+### BREAKING
+
+- 最低 Go 版本提升至 `1.26.10`，Toolkit 依赖目标为 `v0.3.7`；使用更旧工具链的消费者先升级工具链。
+- `streamx.StreamReader.Copy(n>=2)` 移交源读取权给复制控制器。调用方改为消费返回分支，不再对原 reader 调用 `Recv`；单个分支关闭不关闭其他分支，原 reader 的 `Close` 用于整体关闭，最后一个分支释放源。共享 payload 默认只读，需要修改时由调用方复制。调整创建分支后过早关闭原 reader 的调用顺序。
+- Gemini 流工具调用解析器持有本次流的调用标识和参数累积状态；每个独立响应使用独立 parser，不把同一 parser 跨响应复用。
 
 ### Added
 
+- `llm.GenerationOptions`：提供不含消息、工具执行绑定或 Run 身份的生成参数表示；`Clone` 冻结其中可变参数，`ApplyTo` 将参数应用到 CompletionRequest，失败显式返回错误。
+- `llm`：补充模型调用委托及物理 HTTP attempt 观察与记账能力。`AttemptReceipt.AttemptID` 标识实际 HTTP 尝试，`UsageFields` 保留部分实报边界；`AttemptLedger.Summary` 汇总已知维度并分别报告 UnknownAttempts/PartialAttempts，不因缺失字段补造 TotalTokens，也不重复累计同一回执。Provider 方法调用次数不等于物理 HTTP 尝试数，业务账务与预算由上层消费这些事实。
+- `schema.Validator`：编译并验证动态 JSON Schema，复用 Draft 2020-12 合同；Provider 原生约束与本地验证分开，`format` 的支持范围由验证配置决定。
+- `tokenizer.EstimateCompletionRequest`：估算实际请求中的消息、工具定义及工具参数，结果保留估算属性，不等同供应商账单。
 - `llm/openai`：新增可选 Responses/Computer Use 客户端，保留有序动作、截图、响应身份和实际用量；派发前回调可接入调用方的持久回执。单次请求关闭 SDK 自动重试，区分明确失败、未派发和结果未知，不改变通用 `llm.Provider` 接口。
 - `llm/openai`：普通 `Complete`／`Stream` 可显式使用 Responses，支持函数工具、typed 图片及完整多轮输出续传；保持已有方法签名，复用现有传输与派发观察。
 - `template`／`llm`／`streamx`：增加可选 ProviderContinuation，保留有序输出及推理续传，按实际模型和来源隔离；公开 JSON 和普通格式化输出不包含私有载体。流式聚合保留实际请求 ID 和用量存在性，终态校验及取消错误不会丢失派发未知信息。

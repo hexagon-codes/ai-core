@@ -613,7 +613,7 @@ func TestRoleConversion(t *testing.T) {
 			{Role: llm.RoleUser, Content: "u"},
 			{Role: llm.RoleAssistant, Content: "a"},
 			// 工具结果消息：携带 ToolCallID 关联调用，Content 为工具返回内容
-			{Role: llm.RoleTool, Content: "晴天 25 度", ToolCallID: "call_get_weather"},
+			{Role: llm.RoleTool, Content: "晴天 25 度", ToolCallID: "call_get_weather", Name: "get_weather"},
 		},
 	})
 	if err != nil {
@@ -640,8 +640,8 @@ func TestRoleConversion(t *testing.T) {
 	if fr == nil {
 		t.Fatalf("tool part 应为 functionResponse, got %+v (工具结果被当成普通 user 文本，丢失工具语义)", tool.Parts[0])
 	}
-	if fr.Name == "" {
-		t.Error("functionResponse.name 不应为空 (应来自 ToolCallID 关联)")
+	if fr.Name != "get_weather" {
+		t.Error("functionResponse.name 应保留实际函数名")
 	}
 	if fr.Response == nil {
 		t.Error("functionResponse.response 不应为空 (应承载工具返回内容)")

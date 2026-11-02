@@ -180,8 +180,8 @@ func (r *Router) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.
 	r.recordLatency(r.getProviderName(provider), time.Since(start))
 
 	if err != nil {
-		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent {
-			return nil, err
+		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent || llm.IsHTTPAttemptRejected(err) || llm.IsUnsafeToReplay(err) {
+			return resp, err
 		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
@@ -190,7 +190,7 @@ func (r *Router) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.
 			r.recordLatency(r.getProviderName(fallbackProvider), time.Since(fbStart))
 			return fbResp, fbErr
 		}
-		return nil, err
+		return resp, err
 	}
 
 	return resp, nil
@@ -205,14 +205,14 @@ func (r *Router) Stream(ctx context.Context, req llm.CompletionRequest) (*stream
 
 	stream, err := provider.Stream(ctx, req)
 	if err != nil {
-		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent {
-			return nil, err
+		if llm.OperationSafetyFromContext(ctx) == llm.OperationSafetyNonIdempotent || llm.IsHTTPAttemptRejected(err) || llm.IsUnsafeToReplay(err) {
+			return stream, err
 		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
 			return fallbackProvider.Stream(ctx, req)
 		}
-		return nil, err
+		return stream, err
 	}
 
 	return stream, nil
@@ -728,6 +728,23 @@ func (e *MultiProviderError) Error() string {
 	return fmt.Sprintf("all providers failed: %v", e.Errors)
 }
 
+// Unwrap 保留各次尝试的公开错误能力，外层不得因聚合而漏掉未知结果。
+func (e *MultiProviderError) Unwrap() []error {
+	if e == nil {
+		return nil
+	}
+	keys := make([]string, 0, len(e.Errors))
+	for key := range e.Errors {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	result := make([]error, 0, len(keys))
+	for _, key := range keys {
+		result = append(result, e.Errors[key])
+	}
+	return result
+}
+
 // ExecuteWithRetry 带重试执行
 //
 // 每次尝试前检查 ctx，并在重试间使用指数退避（退避同样受 ctx 控制）；
@@ -748,11 +765,11 @@ func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionReq
 	err := retry.DoWithContext(ctx, func() error {
 		attempt++
 		r, e := router.Complete(ctx, req)
+		resp = r
 		if e != nil {
 			errs[fmt.Sprintf("attempt_%d", attempt)] = e
 			return e
 		}
-		resp = r
 		return nil
 	},
 		retry.Attempts(maxRetries),
@@ -760,6 +777,7 @@ func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionReq
 		retry.Multiplier(2),
 		retry.DelayType(retry.ExponentialBackoff),
 		retry.MaxDelay(10*time.Second),
+		retry.If(func(err error) bool { return !llm.IsHTTPAttemptRejected(err) && !llm.IsUnsafeToReplay(err) }),
 	)
 	if err == nil {
 		return resp, nil
@@ -767,8 +785,11 @@ func ExecuteWithRetry(ctx context.Context, router *Router, req llm.CompletionReq
 
 	// ctx 取消/超时：透传，便于调用方区分（区别于 Provider 业务错误）。
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		return nil, ctxErr
+		if len(errs) > 0 {
+			return resp, errors.Join(ctxErr, &MultiProviderError{Errors: errs})
+		}
+		return resp, ctxErr
 	}
 
-	return nil, &MultiProviderError{Errors: errs}
+	return resp, &MultiProviderError{Errors: errs}
 }

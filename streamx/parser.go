@@ -1,7 +1,10 @@
 package streamx
 
 import (
+	"bytes"
+	"crypto/rand"
 	"encoding/json"
+	"fmt"
 	"strings"
 )
 
@@ -241,15 +244,31 @@ func (p *ClaudeParser) IsDone(data []byte) bool {
 // Gemini 的响应包含 candidates 数组，每个 candidate 包含 content.parts
 // 文本内容在 parts[].text 中，可能有多个 part 需要拼接
 // 流结束通过 finishReason 字段标识
-type GeminiParser struct{}
+type GeminiParser struct {
+	calls []*geminiCallSnapshot
+	byID  map[string]*geminiCallSnapshot
+}
+
+type geminiCallSnapshot struct {
+	index          int
+	id, name, args string
+	emitted        bool
+}
 
 // geminiChunk 是 Gemini 流式响应的 JSON 结构
 // 主要关注 candidates[0].content.parts 中的文本内容
 type geminiChunk struct {
-	Candidates []struct {
+	ResponseID   string `json:"responseId"`
+	ModelVersion string `json:"modelVersion"`
+	Candidates   []struct {
 		Content struct {
 			Parts []struct {
-				Text string `json:"text"`
+				Text         string `json:"text"`
+				FunctionCall *struct {
+					ID   string          `json:"id"`
+					Name string          `json:"name"`
+					Args json.RawMessage `json:"args"`
+				} `json:"functionCall,omitempty"`
 			} `json:"parts"`
 			Role string `json:"role"`
 		} `json:"content"`
@@ -275,7 +294,12 @@ func (p *GeminiParser) Parse(data []byte) (*Chunk, error) {
 	}
 
 	chunk := &Chunk{
-		Raw: data,
+		Raw:   data,
+		ID:    gem.ResponseID,
+		Model: gem.ModelVersion,
+	}
+	if gem.UsageMetadata != nil {
+		chunk.Usage = &Usage{PromptTokens: gem.UsageMetadata.PromptTokenCount, CompletionTokens: gem.UsageMetadata.CandidatesTokenCount, TotalTokens: gem.UsageMetadata.TotalTokenCount}
 	}
 
 	if len(gem.Candidates) > 0 {
@@ -287,11 +311,72 @@ func (p *GeminiParser) Parse(data []byte) (*Chunk, error) {
 		var content strings.Builder
 		for _, part := range candidate.Content.Parts {
 			content.WriteString(part.Text)
+			if call := part.FunctionCall; call != nil {
+				if p.byID == nil {
+					p.byID = make(map[string]*geminiCallSnapshot)
+				}
+				var snapshot *geminiCallSnapshot
+				if call.ID != "" {
+					snapshot = p.byID[call.ID]
+				}
+				if snapshot == nil {
+					id := call.ID
+					if id == "" {
+						id = "gemini_call_" + rand.Text()
+					}
+					snapshot = &geminiCallSnapshot{index: len(p.calls), id: id, name: call.Name}
+					p.calls = append(p.calls, snapshot)
+					if call.ID != "" {
+						p.byID[call.ID] = snapshot
+					}
+					if candidate.FinishReason == "" {
+						chunk.ToolCalls = append(chunk.ToolCalls, ToolCall{Index: snapshot.index, ID: id, Name: call.Name, Type: "function"})
+					}
+				} else if call.Name != "" && snapshot.name != call.Name {
+					return nil, fmt.Errorf("gemini: function call %q changed its name", call.ID)
+				}
+				if len(call.Args) > 0 && string(call.Args) != "null" {
+					args, err := geminiCompleteArgs(call.Args)
+					if err != nil {
+						return nil, err
+					}
+					snapshot.args = args
+				}
+			}
 		}
 		chunk.Content = content.String()
+		// args 是完整对象快照，不是 JSON 文本增量；终态只交付一次最终对象。
+		// 槽位按调用出现顺序分配，真实 id 关联后续快照，不猜测线上 partIndex 字段。
+		if candidate.FinishReason != "" {
+			for _, call := range p.calls {
+				if call.emitted {
+					continue
+				}
+				args := call.args
+				if args == "" {
+					args = "{}"
+				}
+				chunk.ToolCalls = append(chunk.ToolCalls, ToolCall{Index: call.index, ID: call.id, Name: call.name, Type: "function", Arguments: args})
+				call.emitted = true
+			}
+		}
 	}
 
 	return chunk, nil
+}
+
+func geminiCompleteArgs(raw json.RawMessage) (string, error) {
+	var args map[string]any
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&args); err != nil {
+		return "", fmt.Errorf("gemini: invalid function arguments: %w", err)
+	}
+	data, err := json.Marshal(args)
+	if err != nil {
+		return "", err
+	}
+	return string(data), nil
 }
 
 // IsDone 检查是否为 Gemini 的流结束标记

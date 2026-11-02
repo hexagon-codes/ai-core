@@ -21,6 +21,9 @@ func isRetryableError(err error) bool {
 	if err == nil {
 		return false
 	}
+	if IsHTTPAttemptRejected(err) || IsUnsafeToReplay(err) {
+		return false
+	}
 	if errors.Is(err, ErrNetworkPolicy) {
 		return false
 	}

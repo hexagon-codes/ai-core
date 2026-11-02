@@ -126,6 +126,18 @@ func Do(ctx context.Context, cfg Request) (*http.Response, error) {
 	if client == nil {
 		client = http.DefaultClient
 	}
+	if decorate, ok := ctx.Value(clientDecoratorKey{}).(ClientDecorator); ok {
+		var err error
+		client, err = decorate(ctx, client, cfg)
+		if err != nil {
+			cancelRequest()
+			return nil, err
+		}
+		if client == nil {
+			cancelRequest()
+			return nil, errors.New("HTTP client decorator returned nil client")
+		}
+	}
 	beforeSendHook := beforeSendHookForAction(ctx, cfg.Action)
 	if beforeSendHook != nil {
 		// http.Client follows 307/308 with the original method and GetBody,
@@ -186,6 +198,10 @@ func Do(ctx context.Context, cfg Request) (*http.Response, error) {
 		resp, err := client.Do(httpReq)
 		elapsed := time.Since(startedAt)
 		if err != nil {
+			if attemptRejected(err) {
+				cancelRequest()
+				return nil, err
+			}
 			if attempt < retryPolicy.MaxAttempts && shouldRetryNetworkError(ctx, err, retryPolicy) {
 				if waitErr := waitForRetry(ctx, retryDelay(retryPolicy, attempt, 0)); waitErr != nil {
 					cancelRequest()
