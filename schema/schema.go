@@ -24,6 +24,8 @@ type Schema struct {
 	// 默认空（不输出），可设为 Draft2020_12。多用于独立文档/结构化输出，
 	// 工具参数一般不应设置（见 Draft2020_12 说明）。
 	Dialect     string             `json:"$schema,omitempty"`
+	Ref         string             `json:"$ref,omitempty"`
+	Defs        map[string]*Schema `json:"$defs,omitempty"`
 	Type        string             `json:"type,omitempty"`
 	Title       string             `json:"title,omitempty"`
 	Description string             `json:"description,omitempty"`
@@ -127,13 +129,55 @@ func FromValue(v any) *Schema {
 }
 
 func fromType(t reflect.Type) *Schema {
+	g := &typeGenerator{active: make(map[reflect.Type]*typeEntry), defs: make(map[string]*Schema)}
+	result := g.build(t)
+	if len(g.defs) > 0 {
+		result.Defs = g.defs
+	}
+	return result
+}
+
+type typeEntry struct {
+	id         string
+	schema     *Schema
+	referenced bool
+}
+
+// typeGenerator 仅跟踪本次生成栈中的类型，递归回边输出引用，不构造循环的 Go 指针图。
+type typeGenerator struct {
+	active map[reflect.Type]*typeEntry
+	defs   map[string]*Schema
+	next   int
+}
+
+func (g *typeGenerator) build(t reflect.Type) *Schema {
 	if t == nil {
 		return &Schema{Type: "null"}
 	}
+	if entry, ok := g.active[t]; ok {
+		entry.referenced = true
+		return &Schema{Ref: "#/$defs/" + entry.id}
+	}
+	entry := &typeEntry{id: "type_" + strconv.Itoa(g.next), schema: &Schema{}}
+	g.next++
+	g.active[t] = entry
+	defer func() {
+		delete(g.active, t)
+		if entry.referenced {
+			// 定义拷贝不带根部的 $defs，避免根定义直接指回自身对象。
+			definition := *entry.schema
+			definition.Defs = nil
+			g.defs[entry.id] = &definition
+		}
+	}()
+	result := g.buildValue(t)
+	*entry.schema = *result
+	return entry.schema
+}
 
-	// 处理指针
+func (g *typeGenerator) buildValue(t reflect.Type) *Schema {
 	if t.Kind() == reflect.Pointer {
-		return fromType(t.Elem())
+		return g.build(t.Elem())
 	}
 
 	switch t.Kind() {
@@ -149,12 +193,12 @@ func fromType(t reflect.Type) *Schema {
 	case reflect.Slice, reflect.Array:
 		return &Schema{
 			Type:  "array",
-			Items: fromType(t.Elem()),
+			Items: g.build(t.Elem()),
 		}
 	case reflect.Map:
 		return &Schema{Type: "object"}
 	case reflect.Struct:
-		return fromStruct(t)
+		return g.fromStruct(t)
 	case reflect.Interface:
 		return &Schema{Type: "object"}
 	default:
@@ -162,7 +206,7 @@ func fromType(t reflect.Type) *Schema {
 	}
 }
 
-func fromStruct(t reflect.Type) *Schema {
+func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 	schema := &Schema{
 		Type:       "object",
 		Properties: make(map[string]*Schema),
@@ -190,7 +234,7 @@ func fromStruct(t reflect.Type) *Schema {
 			}
 		}
 
-		propSchema := fromType(field.Type)
+		propSchema := g.build(field.Type)
 
 		// 解析 desc tag
 		if desc := field.Tag.Get("desc"); desc != "" {
@@ -207,7 +251,7 @@ func fromStruct(t reflect.Type) *Schema {
 			parts := strings.Split(enumStr, ",")
 			enums := make([]any, len(parts))
 			for j, p := range parts {
-				enums[j] = strings.TrimSpace(p)
+				enums[j] = parseDefault(strings.TrimSpace(p), propSchema.Type)
 			}
 			propSchema.Enum = enums
 		}
