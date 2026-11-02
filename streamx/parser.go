@@ -126,7 +126,9 @@ func (p *OpenAIParser) IsDone(data []byte) bool {
 //   - content_block_delta: 内容增量
 //   - message_delta: 消息级别的增量更新
 //   - message_stop: 消息结束
-type ClaudeParser struct{}
+type ClaudeParser struct {
+	stopReason string
+}
 
 // claudeEvent 是 Claude 流式响应的事件结构
 // type 字段标识事件类型，不同类型有不同的数据字段
@@ -182,6 +184,7 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 
 	switch evt.Type {
 	case "message_start":
+		p.stopReason = ""
 		if evt.Message != nil {
 			chunk.ID = evt.Message.ID
 			chunk.Role = evt.Message.Role
@@ -219,10 +222,17 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 	case "message_delta":
 		if evt.Delta != nil {
 			chunk.FinishReason = evt.Delta.StopReason
+			if evt.Delta.StopReason != "" {
+				p.stopReason = evt.Delta.StopReason
+			}
 		}
 
 	case "message_stop":
-		chunk.FinishReason = "stop"
+		// 这里只表示传输结束，不能覆盖 message_delta 已报告的实际停止原因。
+		chunk.FinishReason = p.stopReason
+		if chunk.FinishReason == "" {
+			chunk.FinishReason = "unknown"
+		}
 	}
 
 	return chunk, nil

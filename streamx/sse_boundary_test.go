@@ -54,8 +54,8 @@ func TestSSEBoundary_ClaudeEventLinesIgnored(t *testing.T) {
 	if result.Content != "Hi" {
 		t.Errorf("expected content 'Hi', got %q", result.Content)
 	}
-	if result.FinishReason != "stop" {
-		t.Errorf("expected finish_reason 'stop', got %q", result.FinishReason)
+	if result.FinishReason != "unknown" {
+		t.Errorf("expected unknown finish reason without message_delta, got %q", result.FinishReason)
 	}
 }
 
