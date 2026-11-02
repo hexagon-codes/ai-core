@@ -49,7 +49,22 @@ type Schema struct {
 	MaxLength            *int     `json:"maxLength,omitempty"`
 	Pattern              string   `json:"pattern,omitempty"`
 	Format               string   `json:"format,omitempty"`
+	// AdditionalKeywords 保留尚无类型字段的原始Schema关键字，参与完整JSON序列化与验证。
+	// 已声明的类型字段拥有同名关键字，额外值不能覆盖它们。
+	AdditionalKeywords map[string]any `json:"-"`
 }
+
+var schemaKeywordNames = func() map[string]bool {
+	result := make(map[string]bool)
+	typ := reflect.TypeFor[Schema]()
+	for i := 0; i < typ.NumField(); i++ {
+		name := strings.Split(typ.Field(i).Tag.Get("json"), ",")[0]
+		if name != "" && name != "-" {
+			result[name] = true
+		}
+	}
+	return result
+}()
 
 // String 返回 Schema 的 JSON 字符串表示
 func (s *Schema) String() string {
@@ -58,9 +73,60 @@ func (s *Schema) String() string {
 }
 
 // MarshalJSON 实现 json.Marshaler 接口
-func (s *Schema) MarshalJSON() ([]byte, error) {
+func (s Schema) MarshalJSON() ([]byte, error) {
 	type Alias Schema
-	return json.Marshal((*Alias)(s))
+	encoded, err := json.Marshal(Alias(s))
+	if err != nil || len(s.AdditionalKeywords) == 0 {
+		return encoded, err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(encoded, &document); err != nil {
+		return nil, err
+	}
+	for name, value := range s.AdditionalKeywords {
+		if schemaKeywordNames[name] {
+			continue
+		}
+		raw, err := json.Marshal(value)
+		if err != nil {
+			return nil, err
+		}
+		document[name] = raw
+	}
+	return json.Marshal(document)
+}
+
+// UnmarshalJSON 在保留已有类型字段的同时，保持额外约束及其数字字面精度。
+func (s *Schema) UnmarshalJSON(data []byte) error {
+	if strings.TrimSpace(string(data)) == "null" {
+		return nil
+	}
+	type Alias Schema
+	var decoded Alias
+	if err := json.Unmarshal(data, &decoded); err != nil {
+		return err
+	}
+	var document map[string]json.RawMessage
+	if err := json.Unmarshal(data, &document); err != nil {
+		return err
+	}
+	for name, raw := range document {
+		if schemaKeywordNames[name] {
+			continue
+		}
+		var value any
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil {
+			return err
+		}
+		if decoded.AdditionalKeywords == nil {
+			decoded.AdditionalKeywords = make(map[string]any)
+		}
+		decoded.AdditionalKeywords[name] = value
+	}
+	*s = Schema(decoded)
+	return nil
 }
 
 // WithDialect 设置 $schema 方言并返回自身（链式）。
