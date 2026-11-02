@@ -57,6 +57,8 @@ type Message struct {
 	ToolCallID string `json:"tool_call_id,omitempty"`
 	// ToolCalls 工具调用列表（当 Role=RoleAssistant 且 LLM 请求工具调用时填充）
 	ToolCalls []ToolCallRef `json:"tool_calls,omitempty"`
+	// ProviderContinuation 只由可信适配器产生，公开消息序列化不会透出协议私有状态。
+	ProviderContinuation *ProviderContinuation `json:"-"`
 }
 
 // ToolCallRef 轻量工具调用引用，存储在 Message 中

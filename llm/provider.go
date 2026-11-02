@@ -24,6 +24,9 @@ type (
 
 	// ImageURL 图片 URL
 	ImageURL = template.ImageURL
+
+	// ProviderContinuation 是由可信适配器生成的协议续传内容。
+	ProviderContinuation = template.ProviderContinuation
 )
 
 // 重新导出角色常量
@@ -211,6 +214,8 @@ type ResponseFormatJSONSchema struct {
 type CompletionResponse struct {
 	// ID 响应的唯一标识符
 	ID string `json:"id"`
+	// RequestID 是实际 HTTP x-request-id，与响应对象 ID 分开保存。
+	RequestID string `json:"-"`
 
 	// Model 使用的模型名称
 	Model string `json:"model"`
@@ -232,6 +237,11 @@ type CompletionResponse struct {
 
 	// ReasoningReceipt 记录推理控制的发送、接受与可观察执行证据
 	ReasoningReceipt *ReasoningReceipt `json:"reasoning_evidence,omitempty"`
+
+	// ProviderContinuation 只供内部多轮续传，不属于公开补全结果。
+	ProviderContinuation *ProviderContinuation `json:"-"`
+	// UsageReceipt 保留上游实际报告的用量；nil 表示未提供，不能解释为零消耗。
+	UsageReceipt *Usage `json:"-"`
 }
 
 // HasToolCalls 检查响应是否包含工具调用

@@ -36,6 +36,14 @@ type ProviderError struct {
 	Cause error
 }
 
+// HTTPStatusCode 返回已观察的上游状态，不读取可能包含敏感数据的错误正文。
+func (e *ProviderError) HTTPStatusCode() int {
+	if e == nil {
+		return 0
+	}
+	return e.StatusCode
+}
+
 func (e *ProviderError) Error() string {
 	if e == nil {
 		return "<nil>"

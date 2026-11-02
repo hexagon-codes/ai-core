@@ -26,15 +26,16 @@ const (
 
 // Provider 实现 OpenAI LLM 提供者
 type Provider struct {
-	apiKey         string
-	baseURL        string
-	model          string
-	httpClient     *http.Client
-	requestTimeout time.Duration
-	streamIdle     time.Duration
-	headers        map[string]string
-	networkPolicy  *llm.NetworkPolicy
-	transport      *transport.Transport
+	apiKey          string
+	baseURL         string
+	model           string
+	httpClient      *http.Client
+	requestTimeout  time.Duration
+	streamIdle      time.Duration
+	headers         map[string]string
+	networkPolicy   *llm.NetworkPolicy
+	transport       *transport.Transport
+	responsesModels map[string]struct{}
 }
 
 // Option 是 Provider 的配置选项
@@ -128,6 +129,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	if req.Model == "" {
 		req.Model = p.model
 	}
+	if p.useResponsesProtocol(ctx, req.Model) {
+		return p.completeResponses(ctx, req)
+	}
 	reasoningPlan, explicitReasoning, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, p.baseURL)
 	if err != nil {
 		if explicitReasoning {
@@ -173,6 +177,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*streamx.Stream, error) {
 	if req.Model == "" {
 		req.Model = p.model
+	}
+	if p.useResponsesProtocol(ctx, req.Model) {
+		return p.streamResponses(ctx, req)
 	}
 	reasoningPlan, explicitReasoning, err := llm.PlanReasoningFromMetadata(req.Metadata, req.Model, p.baseURL)
 	if err != nil {

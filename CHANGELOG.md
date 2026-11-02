@@ -4,6 +4,16 @@
 
 ## [Unreleased]
 
+### Added
+
+- `llm/openai`：新增可选 Responses/Computer Use 客户端，保留有序动作、截图、响应身份和实际用量；派发前回调可接入调用方的持久回执。单次请求关闭 SDK 自动重试，区分明确失败、未派发和结果未知，不改变通用 `llm.Provider` 接口。
+- `llm/openai`：普通 `Complete`／`Stream` 可显式使用 Responses，支持函数工具、typed 图片及完整多轮输出续传；保持已有方法签名，复用现有传输与派发观察。
+- `template`／`llm`／`streamx`：增加可选 ProviderContinuation，保留有序输出及推理续传，按实际模型和来源隔离；公开 JSON 和普通格式化输出不包含私有载体。流式聚合保留实际请求 ID 和用量存在性，终态校验及取消错误不会丢失派发未知信息。
+
+### Changed
+
+- 官方 OpenAI Go SDK 更新至 `v3.91.0`，最低 Go 工具链更新至 `1.26.10`；同步必要的依赖解析。
+
 ## [0.2.13] - 2026-10-25
 
 ### Added
