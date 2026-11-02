@@ -2,6 +2,7 @@ package schema
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"reflect"
 	"sort"
@@ -44,11 +45,14 @@ type Schema struct {
 	Enum                 []any    `json:"enum,omitempty"`
 	Default              any      `json:"default,omitempty"`
 	Minimum              *float64 `json:"minimum,omitempty"`
-	Maximum              *float64 `json:"maximum,omitempty"`
-	MinLength            *int     `json:"minLength,omitempty"`
-	MaxLength            *int     `json:"maxLength,omitempty"`
-	Pattern              string   `json:"pattern,omitempty"`
-	Format               string   `json:"format,omitempty"`
+	// MinimumNumber/MaximumNumber在非空时优先，保留精确数值字面量。
+	MinimumNumber json.Number `json:"-"`
+	MaximumNumber json.Number `json:"-"`
+	Maximum       *float64    `json:"maximum,omitempty"`
+	MinLength     *int        `json:"minLength,omitempty"`
+	MaxLength     *int        `json:"maxLength,omitempty"`
+	Pattern       string      `json:"pattern,omitempty"`
+	Format        string      `json:"format,omitempty"`
 	// AdditionalKeywords 保留尚无类型字段的原始Schema关键字，参与完整JSON序列化与验证。
 	// 已声明的类型字段优先；Items 为空时允许保留旧方言的 tuple items 数组。
 	AdditionalKeywords map[string]any `json:"-"`
@@ -76,12 +80,41 @@ func (s *Schema) String() string {
 func (s Schema) MarshalJSON() ([]byte, error) {
 	type Alias Schema
 	encoded, err := json.Marshal(Alias(s))
-	if err != nil || len(s.AdditionalKeywords) == 0 {
+	if err != nil {
 		return encoded, err
 	}
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(encoded, &document); err != nil {
 		return nil, err
+	}
+	for name, value := range map[string]any{"enum": s.Enum, "anyOf": s.AnyOf, "oneOf": s.OneOf, "allOf": s.AllOf} {
+		present := false
+		switch name {
+		case "enum":
+			present = s.Enum != nil
+		case "anyOf":
+			present = s.AnyOf != nil
+		case "oneOf":
+			present = s.OneOf != nil
+		case "allOf":
+			present = s.AllOf != nil
+		}
+		if present {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			document[name] = raw
+		}
+	}
+	for name, value := range map[string]json.Number{"minimum": s.MinimumNumber, "maximum": s.MaximumNumber} {
+		if value != "" {
+			raw, err := json.Marshal(value)
+			if err != nil {
+				return nil, err
+			}
+			document[name] = raw
+		}
 	}
 	for name, value := range s.AdditionalKeywords {
 		_, tupleItems := value.([]any)
@@ -111,18 +144,50 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 	// Items 的类型字段表示同质数组，旧方言的 tuple 数组保持原始形状。
 	items := document["items"]
 	tupleItems := strings.HasPrefix(strings.TrimSpace(string(items)), "[")
-	typedData := data
+	typedDocument := make(map[string]json.RawMessage, len(document))
+	for name, raw := range document {
+		typedDocument[name] = raw
+	}
 	if tupleItems {
-		delete(document, "items")
-		var err error
-		typedData, err = json.Marshal(document)
-		if err != nil {
+		delete(typedDocument, "items")
+	}
+	delete(typedDocument, "minimum")
+	delete(typedDocument, "maximum")
+	typedData, err := json.Marshal(typedDocument)
+	if err != nil {
+		return err
+	}
+	decoder := json.NewDecoder(strings.NewReader(string(typedData)))
+	decoder.UseNumber()
+	if err := decoder.Decode(&decoded); err != nil {
+		return err
+	}
+	for _, name := range []string{"minimum", "maximum"} {
+		raw, present := document[name]
+		if !present {
+			continue
+		}
+		var value any
+		decoder := json.NewDecoder(strings.NewReader(string(raw)))
+		decoder.UseNumber()
+		if err := decoder.Decode(&value); err != nil {
 			return err
 		}
-		document["items"] = items
-	}
-	if err := json.Unmarshal(typedData, &decoded); err != nil {
-		return err
+		number, ok := value.(json.Number)
+		if !ok {
+			return fmt.Errorf("schema: %s must be a number", name)
+		}
+		if name == "minimum" {
+			decoded.MinimumNumber = number
+			if approximate, err := number.Float64(); err == nil {
+				decoded.Minimum = &approximate
+			}
+		} else {
+			decoded.MaximumNumber = number
+			if approximate, err := number.Float64(); err == nil {
+				decoded.Maximum = &approximate
+			}
+		}
 	}
 	for name, raw := range document {
 		if schemaKeywordNames[name] && !(name == "items" && tupleItems) {
