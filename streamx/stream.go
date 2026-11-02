@@ -9,6 +9,8 @@ import (
 	"io"
 	"strings"
 	"sync"
+
+	"github.com/hexagon-codes/ai-core/template"
 )
 
 var (
@@ -103,6 +105,10 @@ func isKnownReasoningDialect(source, dialect string) bool {
 // 每次从流中读取数据时，会解析为一个 Chunk 对象
 // 多个 Chunk 的 Content 拼接后形成完整的响应内容
 type Chunk struct {
+	// RequestID 只承载真实 HTTP 请求回执，不把模型响应 ID 当作请求 ID。
+	RequestID string `json:"-"`
+	// ProviderContinuation 仅在完整模型终态产生，不通过公开流消息序列化。
+	ProviderContinuation *template.ProviderContinuation `json:"-"`
 	// Usage 是上游报告的本次请求累计用量；nil 表示该帧没有用量信息。
 	Usage *Usage `json:"usage,omitempty"`
 	// ID 响应的唯一标识符，通常在首个块中返回
@@ -188,6 +194,12 @@ type Usage struct {
 // Result 表示流式响应处理完成后的完整结果
 // 包含所有块合并后的完整内容和统计信息
 type Result struct {
+	// RequestID 保留实际 HTTP 请求身份，不随公开流结果序列化。
+	RequestID string `json:"-"`
+	// ProviderContinuation 保留最后一份完整协议续传快照。
+	ProviderContinuation *template.ProviderContinuation `json:"-"`
+	// UsageReceipt 是上游最后一份累计用量；nil 表示没有实际报告。
+	UsageReceipt *Usage `json:"-"`
 	// ID 响应的唯一标识符
 	ID string `json:"id,omitempty"`
 	// Content 所有块拼接后的完整文本内容
@@ -523,7 +535,11 @@ func (s *Stream) Collect() (*Result, error) {
 				}
 				s.mu.Lock()
 				result := s.result
+				terminalErr := s.streamErr
 				s.mu.Unlock()
+				if terminalErr != nil {
+					return result, terminalErr
+				}
 				return result, lastErr
 			}
 			// chunk 已在 processLoop 中处理，这里只需消费
@@ -547,7 +563,18 @@ func (s *Stream) Collect() (*Result, error) {
 				s.mu.Unlock()
 				return result, terminalErr
 			}
-			return result, s.ctx.Err()
+			cancelErr := s.ctx.Err()
+			if normalizer, ok := s.parser.(interface{ NormalizeTerminalError(error) error }); ok {
+				cancelErr = normalizer.NormalizeTerminalError(cancelErr)
+				if cancelErr == nil {
+					// 完整协议终态已取得时，以聚合和生命周期发布后的事实为准。
+					<-s.done
+					s.mu.Lock()
+					result, cancelErr = s.result, s.streamErr
+					s.mu.Unlock()
+				}
+			}
+			return result, cancelErr
 		}
 	}
 }
@@ -629,8 +656,13 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 		// （Gemini 的最后一个 chunk 既包含 content 又包含 finishReason）
 		chunk, err := s.parser.Parse([]byte(data))
 		if err != nil {
-			// 如果解析失败且是结束标记，则正常结束
+			// 旧协议的合法结束哨兵可以不属于 JSON；有协议终态校验的解析器仍须发布真实错误。
 			if s.parser.IsDone([]byte(data)) {
+				if normalizer, ok := s.parser.(interface{ NormalizeTerminalError(error) error }); ok {
+					if terminalErr := normalizer.NormalizeTerminalError(err); terminalErr != nil {
+						s.sendErrorWithCallback(terminalErr, onError)
+					}
+				}
 				s.finalize(contentBuf.String(), onDone)
 				return
 			}
@@ -648,6 +680,9 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			if chunk.ID != "" && s.result.ID == "" {
 				s.result.ID = chunk.ID
 			}
+			if chunk.RequestID != "" {
+				s.result.RequestID = chunk.RequestID
+			}
 			if chunk.Role != "" && s.result.Role == "" {
 				s.result.Role = chunk.Role
 			}
@@ -660,6 +695,11 @@ func (s *Stream) processLoop(onChunk func(*Chunk), onDone func(*Result), onError
 			if chunk.Usage != nil {
 				// OpenAI 的 usage 是累计快照，重复终帧不可重复累加。
 				s.result.Usage = *chunk.Usage
+				usage := *chunk.Usage
+				s.result.UsageReceipt = &usage
+			}
+			if chunk.ProviderContinuation != nil {
+				s.result.ProviderContinuation = chunk.ProviderContinuation.Clone()
 			}
 			if chunk.ReasoningEvidence != nil {
 				s.result.ReasoningEvidence = cloneReasoningEvidence(chunk.ReasoningEvidence)
@@ -744,6 +784,10 @@ func (s *Stream) finishTerminal() {
 	if s.streamErr == nil && s.ctx.Err() != nil {
 		s.streamErr = s.ctx.Err()
 	}
+	// 需要完整终帧的协议可把取消或静默 EOF 归一为其实际请求回执。
+	if normalizer, ok := s.parser.(interface{ NormalizeTerminalError(error) error }); ok {
+		s.streamErr = normalizer.NormalizeTerminalError(s.streamErr)
+	}
 	callbacks := append([]func(){}, s.onTerminal...)
 	s.onTerminal = nil
 	s.mu.Unlock()
@@ -764,7 +808,11 @@ func (s *Stream) finishTerminal() {
 func (s *Stream) finalize(content string, onDone func(*Result)) {
 	s.mu.Lock()
 	s.result.Content = content
-	if len(s.result.ToolCalls) == 0 {
+	allowInline := true
+	if policy, ok := s.parser.(interface{ AllowInlineToolCallRecovery() bool }); ok {
+		allowInline = policy.AllowInlineToolCallRecovery()
+	}
+	if allowInline && len(s.result.ToolCalls) == 0 {
 		if calls, cleaned, ok := RecoverInlineToolCalls(s.result.Content); ok {
 			s.result.ToolCalls = calls
 			s.result.Content = cleaned

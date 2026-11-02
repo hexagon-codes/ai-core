@@ -17,6 +17,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"regexp"
@@ -96,38 +97,39 @@ func ParseJSON[T any](sr *StreamReader[string], config ...*JSONParseConfig) *Str
 		cfg = config[0]
 	}
 
+	reader, writer := newJSONParserPipe[T](sr, 10)
 	parser := &jsonStreamParser[T]{
-		source:  sr,
-		config:  cfg,
-		buffer:  strings.Builder{},
-		results: make(chan T, 10),
-		done:    make(chan struct{}),
+		source: sr,
+		config: cfg,
+		buffer: strings.Builder{},
+		writer: writer,
 	}
 	go parser.parse()
+	return reader
+}
 
-	return &StreamReader[T]{
-		typ: readerTypePipe,
-		pipe: &pipeReader[T]{
-			ch:   parser.results,
-			done: parser.done,
-		},
-		source: sr.source,
-	}
+// newJSONParserPipe 统一解析器的终态所有权，并沿输入 Reader 原有所有权传递取消。
+func newJSONParserPipe[T any](source *StreamReader[string], capacity int) (*StreamReader[T], *StreamWriter[T]) {
+	reader, writer := Pipe[T](capacity)
+	reader.source = source.source
+	reader.pipe.onClose = source.Close
+	return reader, writer
 }
 
 // jsonStreamParser 流式 JSON 解析器
 type jsonStreamParser[T any] struct {
-	source  *StreamReader[string]
-	config  *JSONParseConfig
-	buffer  strings.Builder
-	results chan T
-	done    chan struct{}
-	mu      sync.Mutex
+	source *StreamReader[string]
+	config *JSONParseConfig
+	buffer strings.Builder
+	writer *StreamWriter[T]
+	mu     sync.Mutex
 }
 
 func (p *jsonStreamParser[T]) parse() {
-	defer close(p.results)
-	defer close(p.done)
+	defer func() {
+		_ = p.source.Close()
+		_ = p.writer.Close()
+	}()
 
 	for {
 		chunk, err := p.source.Recv()
@@ -137,6 +139,7 @@ func (p *jsonStreamParser[T]) parse() {
 			return
 		}
 		if err != nil {
+			_ = p.writer.CloseWithError(err)
 			return
 		}
 
@@ -146,6 +149,7 @@ func (p *jsonStreamParser[T]) parse() {
 
 		// 检查缓冲区大小
 		if p.buffer.Len() > p.config.MaxBufferSize {
+			_ = p.writer.CloseWithError(fmt.Errorf("JSON parse buffer limit exceeded (%d bytes)", p.config.MaxBufferSize))
 			return
 		}
 
@@ -182,9 +186,8 @@ func (p *jsonStreamParser[T]) tryParse() {
 		return
 	}
 
-	select {
-	case p.results <- result:
-	case <-p.done:
+	if err := p.writer.Send(result); err != nil {
+		return
 	}
 }
 
@@ -220,9 +223,8 @@ func (p *jsonStreamParser[T]) tryParseIncremental() {
 	p.buffer.WriteString(content[start+end+1:])
 	p.mu.Unlock()
 
-	select {
-	case p.results <- result:
-	case <-p.done:
+	if err := p.writer.Send(result); err != nil {
+		return
 	}
 }
 
@@ -250,23 +252,16 @@ func ParseJSONArray[T any](sr *StreamReader[string], config ...*JSONParseConfig)
 		cfg = config[0]
 	}
 
+	reader, writer := newJSONParserPipe[T](sr, 10)
 	parser := &jsonArrayParser[T]{
-		source:  sr,
-		config:  cfg,
-		buffer:  strings.Builder{},
-		results: make(chan T, 10),
-		done:    make(chan struct{}),
+		source: sr,
+		config: cfg,
+		buffer: strings.Builder{},
+		writer: writer,
 	}
 	go parser.parse()
 
-	return &StreamReader[T]{
-		typ: readerTypePipe,
-		pipe: &pipeReader[T]{
-			ch:   parser.results,
-			done: parser.done,
-		},
-		source: sr.source,
-	}
+	return reader
 }
 
 // jsonArrayParser JSON 数组流式解析器
@@ -274,8 +269,7 @@ type jsonArrayParser[T any] struct {
 	source  *StreamReader[string]
 	config  *JSONParseConfig
 	buffer  strings.Builder
-	results chan T
-	done    chan struct{}
+	writer  *StreamWriter[T]
 	inArray bool
 	depth   int
 	itemBuf strings.Builder
@@ -283,8 +277,10 @@ type jsonArrayParser[T any] struct {
 }
 
 func (p *jsonArrayParser[T]) parse() {
-	defer close(p.results)
-	defer close(p.done)
+	defer func() {
+		_ = p.source.Close()
+		_ = p.writer.Close()
+	}()
 
 	for {
 		chunk, err := p.source.Recv()
@@ -294,6 +290,7 @@ func (p *jsonArrayParser[T]) parse() {
 			return
 		}
 		if err != nil {
+			_ = p.writer.CloseWithError(err)
 			return
 		}
 
@@ -359,9 +356,8 @@ func (p *jsonArrayParser[T]) flushItem() {
 		return
 	}
 
-	select {
-	case p.results <- result:
-	case <-p.done:
+	if err := p.writer.Send(result); err != nil {
+		return
 	}
 }
 
@@ -543,24 +539,17 @@ type StructuredStreamConfig struct {
 // ParseStructured 解析结构化输出
 // 支持增量解析和字段级更新通知
 func ParseStructured[T any](sr *StreamReader[string], config *StructuredStreamConfig) *StreamReader[T] {
+	reader, writer := newJSONParserPipe[T](sr, 1)
 	parser := &structuredParser[T]{
 		source:  sr,
 		config:  config,
 		buffer:  strings.Builder{},
-		results: make(chan T, 1),
-		done:    make(chan struct{}),
+		writer:  writer,
 		partial: make(map[string]any),
 	}
 	go parser.parse()
 
-	return &StreamReader[T]{
-		typ: readerTypePipe,
-		pipe: &pipeReader[T]{
-			ch:   parser.results,
-			done: parser.done,
-		},
-		source: sr.source,
-	}
+	return reader
 }
 
 // structuredParser 结构化输出解析器
@@ -568,15 +557,16 @@ type structuredParser[T any] struct {
 	source  *StreamReader[string]
 	config  *StructuredStreamConfig
 	buffer  strings.Builder
-	results chan T
-	done    chan struct{}
+	writer  *StreamWriter[T]
 	partial map[string]any
 	mu      sync.Mutex
 }
 
 func (p *structuredParser[T]) parse() {
-	defer close(p.results)
-	defer close(p.done)
+	defer func() {
+		_ = p.source.Close()
+		_ = p.writer.Close()
+	}()
 
 	for {
 		chunk, err := p.source.Recv()
@@ -585,6 +575,7 @@ func (p *structuredParser[T]) parse() {
 			return
 		}
 		if err != nil {
+			_ = p.writer.CloseWithError(err)
 			return
 		}
 
@@ -642,9 +633,8 @@ func (p *structuredParser[T]) finalize() {
 		}
 	}
 
-	select {
-	case p.results <- result:
-	case <-p.done:
+	if err := p.writer.Send(result); err != nil {
+		return
 	}
 }
 

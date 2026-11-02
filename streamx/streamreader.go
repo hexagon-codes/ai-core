@@ -26,7 +26,9 @@ import (
 	"context"
 	"errors"
 	"io"
+	"reflect"
 	"runtime"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -93,6 +95,7 @@ const (
 	readerTypeWindow
 	readerTypeDebounce
 	readerTypeThrottle
+	readerTypeTransferred
 )
 
 // StreamReader 泛型流读取器
@@ -122,6 +125,7 @@ type StreamReader[T any] struct {
 	windowR       any // *windowReader[T] 会产生 []T
 	debounceR     *debounceReader[T]
 	throttleR     *throttleReader[T]
+	copyOwner     *parentStream[T]
 
 	// 元信息
 	source string // 流来源标识
@@ -201,7 +205,9 @@ func (sr *StreamReader[T]) Close() error {
 	case readerTypeMulti:
 		return sr.multi.close()
 	case readerTypeChild:
-		return nil // child 不负责关闭
+		return sr.child.close()
+	case readerTypeTransferred:
+		return sr.copyOwner.close()
 	case readerTypeMap:
 		return sr.mapR.close()
 	case readerTypeFilter:
@@ -252,8 +258,11 @@ func (sr *StreamReader[T]) SetSource(source string) *StreamReader[T] {
 	return sr
 }
 
-// Collect 收集所有元素到切片
+// Collect 收集全部元素并释放读端；取消会主动关闭源以唤醒阻塞读取。
 func (sr *StreamReader[T]) Collect(ctx context.Context) ([]T, error) {
+	stop := context.AfterFunc(ctx, func() { _ = sr.Close() })
+	defer stop()
+	defer func() { _ = sr.Close() }()
 	var items []T
 	for {
 		select {
@@ -261,7 +270,10 @@ func (sr *StreamReader[T]) Collect(ctx context.Context) ([]T, error) {
 			return items, ctx.Err()
 		default:
 			item, err := sr.Recv()
-			if err == io.EOF {
+			if cause := ctx.Err(); cause != nil {
+				return items, cause
+			}
+			if errors.Is(err, io.EOF) {
 				return items, nil
 			}
 			if _, ok := IsSourceEOF(err); ok {
@@ -299,16 +311,11 @@ func (sr *StreamReader[T]) ForEach(ctx context.Context, fn func(T) error) error 
 	}
 }
 
-// Copy 复制流为多个独立读者
-// 每个读者独立消费，不互相影响
-//
-// 实现原理（零分配 Linked List 设计）：
-//   - 使用 sync.Once + 链表实现零分配流复制
-//   - 所有子 Reader 共享同一链表，只追踪不同的读取位置
-//   - 每个节点使用 sync.Once 确保只被初始化一次
-//   - 真正的零拷贝设计，数据只从源流读取一次
-//
-// 惰性多路复制的精细实现
+// Copy 创建独立消费游标。n<=0 返回 nil，n=1 返回原 reader。
+// n>=2 将源消费权交给复制控制器：原 reader 不再 Recv，Close 会取消全部分支。
+// 单分支关闭不影响其他分支，全部关闭或读完后释放源；调用者须关闭弃用分支。
+// chunk 共享且只读，需要修改的消费者应先复制。链表只由活跃游标保留消费前缀，
+// 慢读者仍会保留其未读数据，不承诺任意慢读者条件下缓存有界。
 func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 	if n <= 0 {
 		return nil
@@ -319,15 +326,13 @@ func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 
 	// 创建哨兵头节点
 	// 所有 childReader 从这个哨兵节点开始
-	sentinel := &streamNode[T]{}
+	sentinel := &streamNode[T]{ready: make(chan struct{})}
 
 	// 创建父流管理器
-	parent := &parentStream[T]{
-		source: sr,
-		head:   sentinel, // 链表头（哨兵节点）
-		tail:   sentinel, // 初始时 tail 也指向哨兵
-		done:   false,
-	}
+	raw := *sr
+	parent := &parentStream[T]{source: &raw, children: make(map[*childReader[T]]struct{})}
+	// 控制器持有改写前的底层句柄，原 reader 仅保留整体取消能力。
+	*sr = StreamReader[T]{typ: readerTypeTransferred, copyOwner: parent, source: raw.source}
 
 	// 创建 n 个子读取器，每个都从哨兵节点开始
 	readers := make([]*StreamReader[T], n)
@@ -335,7 +340,9 @@ func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 		child := &childReader[T]{
 			parent:  parent,
 			current: sentinel, // 从哨兵节点开始
+			done:    make(chan struct{}),
 		}
+		parent.children[child] = struct{}{}
 		readers[i] = &StreamReader[T]{
 			typ:    readerTypeChild,
 			child:  child,
@@ -384,10 +391,21 @@ func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
 		&StreamWriter[T]{pipe: writer}
 }
 
+// PipeWithClose 创建管道，并在消费方关闭读端时释放生产链持有的资源。
+// onClose 在关闭信号发出后执行一次，不得等待当前读取回调自身结束。
+func PipeWithClose[T any](cap int, onClose func() error) (*StreamReader[T], *StreamWriter[T]) {
+	reader, writer := Pipe[T](cap)
+	reader.pipe.onClose = onClose
+	return reader, writer
+}
+
 type pipeReader[T any] struct {
-	ch       chan T
-	done     chan struct{}
-	closeErr *atomic.Value
+	ch          chan T
+	done        chan struct{}
+	closeErr    *atomic.Value
+	closeOnce   sync.Once
+	onClose     func() error
+	closeResult error
 }
 
 func (pr *pipeReader[T]) recv() (T, error) {
@@ -395,7 +413,7 @@ func (pr *pipeReader[T]) recv() (T, error) {
 	case item, ok := <-pr.ch:
 		if !ok {
 			var zero T
-			// closeErr 可能未初始化（如 ParseJSON 等仅设 ch/done 的构造路径），需判空防 nil 解引用 panic
+			// 通道耗尽后保留生产者记录的原始终态错误。
 			if pr.closeErr != nil {
 				if err := pr.closeErr.Load(); err != nil {
 					return zero, err.(error)
@@ -414,13 +432,13 @@ func (pr *pipeReader[T]) recv() (T, error) {
 }
 
 func (pr *pipeReader[T]) close() error {
-	select {
-	case <-pr.done:
-		return nil
-	default:
+	pr.closeOnce.Do(func() {
 		close(pr.done)
-		return nil
-	}
+		if pr.onClose != nil {
+			pr.closeResult = pr.onClose()
+		}
+	})
+	return pr.closeResult
 }
 
 type pipeWriter[T any] struct {
@@ -433,6 +451,11 @@ type pipeWriter[T any] struct {
 func (pw *pipeWriter[T]) send(item T) error {
 	if atomic.LoadInt32(&pw.closed) == 1 {
 		return ErrStreamClosed
+	}
+	select {
+	case <-pw.done:
+		return ErrStreamClosed
+	default:
 	}
 	select {
 	case pw.ch <- item:
@@ -591,53 +614,79 @@ type streamNode[T any] struct {
 	err   error
 	next  *streamNode[T]
 	once  sync.Once // 确保 next 只被初始化一次
+	ready chan struct{}
 }
 
 // parentStream 父流（管理链表）
 type parentStream[T any] struct {
-	source *StreamReader[T]
-	head   *streamNode[T] // 链表头（哨兵节点）
-	tail   *streamNode[T] // 链表尾
-	mu     sync.Mutex
-	done   bool
-	endErr error
+	source    *StreamReader[T]
+	mu        sync.Mutex
+	done      bool
+	endErr    error
+	children  map[*childReader[T]]struct{}
+	closeOnce sync.Once
+	closeErr  error
 }
 
 // advance 推进链表，从源流读取下一个元素
 // 使用 sync.Once 确保每个节点只被初始化一次
-func (ps *parentStream[T]) advance(current *streamNode[T]) (*streamNode[T], error) {
-	// 使用 once 确保只初始化一次
+func (ps *parentStream[T]) advance(current *streamNode[T], canceled <-chan struct{}) (*streamNode[T], error) {
+	// 每个共享节点只启动一次读取；分支可独立取消，不以持锁阻塞源读取。
 	current.once.Do(func() {
-		ps.mu.Lock()
-		defer ps.mu.Unlock()
-
-		// 再次检查是否已初始化（double-check）
-		if current.next != nil {
-			return
-		}
-
-		// 如果已经结束
-		if ps.done {
-			current.next = &streamNode[T]{err: ps.endErr}
-			return
-		}
-
-		// 从源流读取
-		item, err := ps.source.Recv()
-		if err != nil {
-			ps.done = true
-			ps.endErr = err
-			current.next = &streamNode[T]{err: err}
-			return
-		}
-
-		// 创建新节点
-		newNode := &streamNode[T]{value: item}
-		current.next = newNode
-		ps.tail = newNode
+		go func() {
+			defer close(current.ready)
+			ps.mu.Lock()
+			done, endErr, source := ps.done, ps.endErr, ps.source
+			ps.mu.Unlock()
+			if done {
+				current.next = &streamNode[T]{err: endErr}
+				return
+			}
+			item, err := source.Recv()
+			ps.mu.Lock()
+			if ps.done {
+				err = ps.endErr
+			} else if err != nil {
+				ps.done, ps.endErr = true, err
+			}
+			ps.mu.Unlock()
+			current.next = &streamNode[T]{value: item, err: err, ready: make(chan struct{})}
+		}()
 	})
+	select {
+	case <-canceled:
+		return nil, ErrStreamClosed
+	case <-current.ready:
+		return current.next, current.next.err
+	}
+}
 
-	return current.next, current.next.err
+func (ps *parentStream[T]) release(child *childReader[T]) error {
+	ps.mu.Lock()
+	delete(ps.children, child)
+	last := len(ps.children) == 0
+	ps.mu.Unlock()
+	if last {
+		return ps.close()
+	}
+	return nil
+}
+
+func (ps *parentStream[T]) close() error {
+	ps.closeOnce.Do(func() {
+		ps.mu.Lock()
+		ps.done, ps.endErr = true, ErrStreamClosed
+		children := ps.children
+		source := ps.source
+		ps.children = nil
+		ps.source = nil
+		ps.mu.Unlock()
+		for child := range children {
+			child.stop(ErrStreamClosed)
+		}
+		ps.closeErr = source.Close()
+	})
+	return ps.closeErr
 }
 
 // childReader 子流读取器
@@ -645,19 +694,56 @@ func (ps *parentStream[T]) advance(current *streamNode[T]) (*streamNode[T], erro
 type childReader[T any] struct {
 	parent  *parentStream[T]
 	current *streamNode[T] // 当前位置
+	mu      sync.Mutex
+	done    chan struct{}
+	closed  bool
+	endErr  error
 }
 
 func (cr *childReader[T]) recv() (T, error) {
-	// 推进到下一个节点
-	next, err := cr.parent.advance(cr.current)
-	if err != nil {
+	cr.mu.Lock()
+	if cr.closed {
+		err := cr.endErr
+		cr.mu.Unlock()
 		var zero T
 		return zero, err
 	}
-
-	// 更新当前位置
+	current := cr.current
+	cr.mu.Unlock()
+	next, err := cr.parent.advance(current, cr.done)
+	if err != nil {
+		if cr.stop(err) {
+			_ = cr.parent.release(cr)
+		}
+		var zero T
+		return zero, err
+	}
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if cr.closed {
+		var zero T
+		return zero, cr.endErr
+	}
 	cr.current = next
 	return next.value, nil
+}
+
+func (cr *childReader[T]) stop(err error) bool {
+	cr.mu.Lock()
+	defer cr.mu.Unlock()
+	if cr.closed {
+		return false
+	}
+	cr.closed, cr.endErr, cr.current = true, err, nil
+	close(cr.done)
+	return true
+}
+
+func (cr *childReader[T]) close() error {
+	if cr.stop(ErrStreamClosed) {
+		return cr.parent.release(cr)
+	}
+	return nil
 }
 
 // ============== 流操作符 ==============
@@ -951,7 +1037,8 @@ func Concat[T any](ctx context.Context, sr *StreamReader[T]) (T, error) {
 	return ConcatItems(items)
 }
 
-// ConcatItems 合并切片中所有元素为一个
+// ConcatItems 合并全部元素；文本和切片可直接连接，其他多元素类型须注册合并函数。
+// 无明确合并语义时返回 ErrNoConcatFunc，不静默取最后一个元素。
 func ConcatItems[T any](items []T) (T, error) {
 	if len(items) == 0 {
 		var zero T
@@ -967,8 +1054,26 @@ func ConcatItems[T any](items []T) (T, error) {
 		return fn.(func([]T) (T, error))(items)
 	}
 
-	// 默认返回最后一个
-	return items[len(items)-1], nil
+	// 文本和切片具有明确的连接语义；其他类型必须显式注册，不能静默丢掉前缀。
+	t := reflect.TypeFor[T]()
+	switch t.Kind() {
+	case reflect.String:
+		var text strings.Builder
+		for _, item := range items {
+			text.WriteString(reflect.ValueOf(item).String())
+		}
+		value := reflect.New(t).Elem()
+		value.SetString(text.String())
+		return value.Interface().(T), nil
+	case reflect.Slice:
+		value := reflect.MakeSlice(t, 0, 0)
+		for _, item := range items {
+			value = reflect.AppendSlice(value, reflect.ValueOf(item))
+		}
+		return value.Interface().(T), nil
+	default:
+		return zero, ErrNoConcatFunc
+	}
 }
 
 // Split 将单个元素分割为流
@@ -981,30 +1086,8 @@ func Split[T any](item T) *StreamReader[T] {
 	return FromValue(item)
 }
 
-func getTypeKey[T any](v T) string {
-	return typeString[T]()
-}
-
-func typeString[T any]() string {
-	var zero T
-	return string(rune(0)) + // 防止空字符串
-		func() string {
-			switch any(zero).(type) {
-			case string:
-				return "string"
-			case int:
-				return "int"
-			case int64:
-				return "int64"
-			case float64:
-				return "float64"
-			case bool:
-				return "bool"
-			default:
-				// 使用反射获取类型名
-				return "any"
-			}
-		}()
+func getTypeKey[T any](_ T) reflect.Type {
+	return reflect.TypeFor[T]()
 }
 
 // ============== 背压控制 ==============
