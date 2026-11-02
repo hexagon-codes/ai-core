@@ -15,6 +15,9 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - v0.3.0 的 `StreamReader.Copy(n>=2)` 转移源读取权，消费者只读取返回分支；原 reader 的关闭表示整体关闭。Gemini 流 parser 按响应独立实例化。完整调用迁移见 [CHANGELOG](CHANGELOG.md)。
 - Copy传播Merge的SourceEOF时仍推进各分支游标；该标记只表示一个源结束，不关闭整个合并流。真正EOF、真实错误及Close继续按原所有权合同释放。
 - `schema.Schema.AdditionalKeywords`保存尚无类型字段的JSON Schema关键字，参与序列化与本地Validator验证；解码保留额外数值字面精度。已声明的类型字段优先；唯一的同名形态补充是 `Items == nil` 时，通过 `AdditionalKeywords["items"]` 的 `[]any` 保留旧方言 tuple 数组，包括其布尔元素和引用。JSON 解码自动保留该形态；显式 `Items` 不被额外值覆盖。非法方言形态仍交给 Validator 报错，不静默删除约束。该能力负责表示保真，不等同于所有模型供应商都支持全部关键词；Provider能力仍以其实际声明为准。
+- `schema.Schema.MinimumNumber` / `MaximumNumber` 是非空时优先的精确 `json.Number` 表示；`Minimum` / `Maximum` 保留为兼容的近似 `float64`。结构化输出和 MCP 往返应以精确字段为准，不能把大整数边界或枚举重新量化为 `float64`。
+- `schema.Schema` 的 `Enum`、`AnyOf`、`OneOf`、`AllOf` 使用非 nil 切片表示“已声明”，空数组也是约束而不是未声明；序列化不得用 `omitempty` 删除。空 `enum` 拒绝所有实例，空 `anyOf` 保持非法 Schema，MCP 适配器不得把二者净化为宽松 Schema。
+- `streamx.Buffer`、`streamx.Timeout` 与 `streamx.Copy` 对 Merge 的 `SourceEOF` 语义一致：它只标记单个源结束，后续源仍须继续读取；真正 EOF、真实错误和主动 Close 才结束整个流。
 
 - `catalog`、`transport`、`llm/compatible` 及 `media/*` 中导出的 Provider 构造器、Option、请求与响应结构体均按 SemVer 维护。
 - `llm.ProviderError`、`llm.NetworkPolicy`、`llm.ErrNetworkPolicy` 是 `transport` 同名类型和值的别名；调用方可继续使用 `llm` 路径，也可逐步迁移到 `transport` 路径，`errors.As` / `errors.Is` 在两种路径间等价。
@@ -26,6 +29,12 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - `llm.AttemptReceipt` 按实际 HTTP AttemptID/ReceiptID 记录累计回执，`UsageFields` 表示供应商实际报告的维度。`AttemptLedger.Summary` 的 UnknownAttempts/PartialAttempts 必须与 Usage 一起解释；只报告 prompt/completion 不代表报告了 total，不能填造实报 TotalTokens。上层预算可另算已知下界，账本仍保留原始用量来源并按实际 attempt 幂等处理。
 - `media/video.Service.Submit` 返回的不透明任务引用必须原样传入 `Poll`，调用方不得依赖其内部编码。`Poll` 继续接受可唯一解析的历史 `{provider}::{taskID}` 引用；存在歧义的旧引用会返回错误。提交成功后首次轮询失败时，`SubmitAndWait` 返回状态仍包含可恢复的 `TaskID`。
 - `media/voice.ChainedTTS` 在 context 标记 `transport.OperationSafetyNonIdempotent` 时，仅对明确未被接纳的合成失败执行 Provider 回退；结果未知时停止，避免重复执行可能已接纳的请求。取消和超时也不会触发回退。`SynthesizeResult.Provider` 与 `IsDefinitiveSynthesisFailure` 为新增的兼容性 API。
+
+## 精确Schema与合流适配
+
+- `Schema.MinimumNumber` / `MaximumNumber` 为可选 `json.Number`，非空时优先于既有 `*float64` 字段；JSON解码保留原始数值字面量，同时为可表示的旧字段提供近似读数。需要改写下界/上界时同步修改或清空相应Number字段，不能只改近似字段。JSON线上仍为数字。
+- `Enum`、`Default`及额外关键字的动态数字解码为 `json.Number`。消费者按数值范围调用Int64/Float64/String并处理错误，不把大整数强转float64作为身份。非nil空Enum/AnyOf/OneOf/AllOf保留声明存在性；Validator继续按原始Schema判断，不把空约束删除为无限制。
+- `Buffer(Merge(...))`和`Timeout(Merge(...))`不会在单个SourceEOF处结束整体流。Buffer消费非终态标记并继续；Timeout按顺序传递标记及后续数据。真正EOF、源错误与主动Close语义不变。
 
 ## CI/CD 边界与门禁
 

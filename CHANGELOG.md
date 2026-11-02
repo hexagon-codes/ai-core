@@ -26,11 +26,19 @@
 ### Changed
 
 - `streamx.Copy`将Merge的SourceEOF作为非终态标记，推进各副本游标并保留后续源数据；真正EOF、错误和主动Close继续遵守既有所有权合同。
+- `streamx.Buffer`、`streamx.Timeout` 与 Copy 对齐：Merge 的 SourceEOF 只表示单个源结束，继续转发后续源；真正 EOF、真实错误和主动 Close 仍终止转发。
 - 官方 OpenAI Go SDK 更新至 `v3.91.0`，最低 Go 工具链更新至 `1.26.10`；同步必要的依赖解析。
 
 ### Fixed
 
+- `schema`：增加可选精确上下界数值字段，JSON往返保留Enum/Default中的大整数；非nil空枚举与组合约束不再被省略。
+- `streamx`：Buffer和Timeout继续读取Merge的单源结束标记之后的数据，避免重复SourceEOF或提前终止。
+
 - `schema.Schema` 保留旧方言的 tuple `items` 数组，包含布尔元素与引用；值/指针序列化和 JSON 往返不再删除该约束，显式 `Items` 仍优先。默认方言不允许的数组形态保留原文并由 Validator 返回错误。
+
+- `schema.Schema` 对 `minimum`/`maximum` 保留精确数值字面量：新增 `MinimumNumber`/`MaximumNumber`，JSON 解码使用 `UseNumber` 后按声明类型写入；兼容字段 `Minimum`/`Maximum` 仍提供近似 `float64`。大整数枚举和边界值不再因 JSON 往返被舍入。
+
+- `schema.Schema` 区分“未声明”与显式空约束：`enum`、`anyOf`、`oneOf`、`allOf` 的非 nil 空数组在 Schema 序列化与解码中保留，不再被 `omitempty` 删除；空 `enum` 仍拒绝所有实例，空 `anyOf` 仍由 Validator 按非法 Schema 处理。MCP 适配器仍须按同一存在性语义转换。
 
 - 原生 Anthropic 流缺少 `message_stop` 时显式返回异常终止，保留已经收到的文本、工具草稿及用量；完整消息仍按原结束原因返回，通用流的 EOF 合同不扩大。
 
