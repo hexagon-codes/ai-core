@@ -329,12 +329,21 @@ func (g *typeGenerator) buildValue(t reflect.Type) *Schema {
 	if t == reflect.TypeFor[time.Time]() {
 		return &Schema{Type: "string", Format: "date-time"}
 	}
+	if t == reflect.TypeFor[json.Number]() {
+		return &Schema{Type: "number"}
+	}
+	if t == reflect.TypeFor[json.RawMessage]() {
+		return &Schema{}
+	}
+	if t.Kind() == reflect.Slice && t.Elem().Kind() == reflect.Uint8 {
+		return &Schema{AnyOf: []*Schema{{Type: "string", AdditionalKeywords: map[string]any{"contentEncoding": "base64"}}, {Type: "null"}}}
+	}
 
 	switch t.Kind() {
 	case reflect.String:
 		return &Schema{Type: "string"}
 	case reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64,
-		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64:
+		reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 		return &Schema{Type: "integer"}
 	case reflect.Float32, reflect.Float64:
 		return &Schema{Type: "number"}
@@ -371,6 +380,10 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 		// 获取 JSON tag 或使用字段名
 		name := field.Name
 		jsonTag := field.Tag.Get("json")
+		stringEncoded := false
+		for _, option := range strings.Split(jsonTag, ",")[1:] {
+			stringEncoded = stringEncoded || option == "string"
+		}
 		if jsonTag == "-" {
 			continue
 		}
@@ -385,6 +398,40 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 		}
 
 		propSchema := g.build(field.Type)
+		originalType := propSchema.Type
+		fieldType := field.Type
+		for fieldType.Kind() == reflect.Pointer {
+			fieldType = fieldType.Elem()
+		}
+		switch fieldType.Kind() {
+		case reflect.Bool, reflect.String, reflect.Int, reflect.Int8, reflect.Int16, reflect.Int32, reflect.Int64, reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr, reflect.Float32, reflect.Float64:
+		default:
+			stringEncoded = false
+		}
+		if stringEncoded {
+			propSchema = &Schema{Type: "string"}
+		}
+		parseTag := func(value string) any {
+			parsed := parseDefault(value, originalType)
+			if fieldType == reflect.TypeFor[json.Number]() {
+				decoder := json.NewDecoder(strings.NewReader(value))
+				decoder.UseNumber()
+				var candidate any
+				if json.Valid([]byte(value)) && decoder.Decode(&candidate) == nil {
+					if number, ok := candidate.(json.Number); ok {
+						parsed = number
+					}
+				}
+			}
+			if !stringEncoded {
+				return parsed
+			}
+			encoded, err := json.Marshal(parsed)
+			if err != nil {
+				return value
+			}
+			return string(encoded)
+		}
 
 		// 解析 desc tag
 		if desc := field.Tag.Get("desc"); desc != "" {
@@ -401,14 +448,14 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			parts := strings.Split(enumStr, ",")
 			enums := make([]any, len(parts))
 			for j, p := range parts {
-				enums[j] = parseDefault(strings.TrimSpace(p), propSchema.Type)
+				enums[j] = parseTag(strings.TrimSpace(p))
 			}
 			propSchema.Enum = enums
 		}
 
 		// 解析 default tag（根据字段类型转换为正确的值类型）
 		if defStr := field.Tag.Get("default"); defStr != "" {
-			propSchema.Default = parseDefault(defStr, propSchema.Type)
+			propSchema.Default = parseTag(defStr)
 		}
 
 		// 解析 format tag
@@ -508,6 +555,16 @@ func parseDefault(s string, schemaType string) any {
 	case "boolean":
 		if v, err := strconv.ParseBool(s); err == nil {
 			return v
+		}
+	}
+	if schemaType == "integer" || schemaType == "number" {
+		decoder := json.NewDecoder(strings.NewReader(s))
+		decoder.UseNumber()
+		var value any
+		if json.Valid([]byte(s)) && decoder.Decode(&value) == nil {
+			if number, ok := value.(json.Number); ok {
+				return number
+			}
 		}
 	}
 	return s
