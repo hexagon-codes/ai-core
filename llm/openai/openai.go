@@ -200,15 +200,17 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 	}
 
 	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat)
+	var parser streamx.ChunkParser = &streamx.OpenAIParser{}
 	if explicitReasoning {
 		receipt := reasoningPlan.Receipt.WithEvidence(true, false, 0)
 		llm.PublishReasoningReceipt(req.Metadata, receipt)
-		stream.SetParser(&openAIReasoningStreamParser{
+		parser = &openAIReasoningStreamParser{
 			base:     &streamx.OpenAIParser{},
 			metadata: req.Metadata,
 			receipt:  receipt,
-		})
+		}
 	}
+	stream.SetParser(&chatCompletionStreamParser{base: parser})
 	return stream, nil
 }
 

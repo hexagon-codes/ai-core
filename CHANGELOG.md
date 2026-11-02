@@ -28,6 +28,8 @@
 
 ### Fixed
 
+- OpenAI Chat 流按实际 `finish_reason` 或 `[DONE]` 确认完成；两者均缺失的 EOF 返回异常终止并保留部分内容及用量，不再让未完成工具草稿进入正常结果。
+
 - Anthropic 的 `message_stop` 只结束传输，不覆盖先前的实际结束原因；没有上游原因时保留 unknown。
 
 ## [0.2.13] - 2026-10-25
