@@ -32,6 +32,8 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 
 ## 精确Schema与合流适配
 
+- `schema.Of` 的静态数值 min/max 标签写入精确 Number 字段；超出本机 int 范围但可表示为 uint64 的 integer enum/default 保留数字字面量，不退回字符串。`time.Time` 及其指针生成 `string`、`format: date-time`，与 Go JSON 表示一致；自定义 MarshalJSON 类型不据此获得自动推断承诺，format 验证仍依赖 Validator 配置。
+
 - `Schema.MinimumNumber` / `MaximumNumber` 为可选 `json.Number`，非空时优先于既有 `*float64` 字段；JSON解码保留原始数值字面量，同时为可表示的旧字段提供近似读数。需要改写下界/上界时同步修改或清空相应Number字段，不能只改近似字段。JSON线上仍为数字。
 - `Enum`、`Default`及额外关键字的动态数字解码为 `json.Number`。消费者按数值范围调用Int64/Float64/String并处理错误，不把大整数强转float64作为身份。非nil空Enum/AnyOf/OneOf/AllOf保留声明存在性；Validator继续按原始Schema判断，不把空约束删除为无限制。
 - `Buffer(Merge(...))`和`Timeout(Merge(...))`不会在单个SourceEOF处结束整体流。Buffer消费非终态标记并继续；Timeout按顺序传递标记及后续数据。真正EOF、源错误与主动Close语义不变。

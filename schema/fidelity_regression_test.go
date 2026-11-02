@@ -3,7 +3,36 @@ package schema
 import (
 	"encoding/json"
 	"testing"
+	"time"
 )
+
+func TestStaticSchemaMatchesTimeJSON(t *testing.T) {
+	type input struct {
+		At       time.Time  `json:"at"`
+		Optional *time.Time `json:"optional"`
+	}
+	raw := []byte(`{"at":"2026-11-03T02:31:48+08:00","optional":"2026-11-03T02:31:48Z"}`)
+	var value input
+	if err := json.Unmarshal(raw, &value); err != nil {
+		t.Fatal(err)
+	}
+	s := Of[input]()
+	for _, name := range []string{"at", "optional"} {
+		if s.Properties[name].Type != "string" || s.Properties[name].Format != "date-time" {
+			t.Fatalf("%s must use time JSON representation", name)
+		}
+	}
+	v, err := NewValidator(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := v.ValidateJSON(raw); err != nil {
+		t.Fatal(err)
+	}
+	if v.ValidateJSON([]byte(`{"at":{}}`)) == nil {
+		t.Fatal("internal object representation accepted")
+	}
+}
 
 func TestSchemaRoundTripPreservesExactConstraints(t *testing.T) {
 	cases := []struct{ name, raw, good, bad string }{

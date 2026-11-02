@@ -8,6 +8,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // Draft2020_12 是 JSON Schema 2020-12 方言（dialect）的标识 URI。
@@ -323,6 +324,10 @@ func (g *typeGenerator) build(t reflect.Type) *Schema {
 func (g *typeGenerator) buildValue(t reflect.Type) *Schema {
 	if t.Kind() == reflect.Pointer {
 		return g.build(t.Elem())
+	}
+	// time.Time 的 JSON 表示是 RFC 3339 字符串，不是其内部结构。
+	if t == reflect.TypeFor[time.Time]() {
+		return &Schema{Type: "string", Format: "date-time"}
 	}
 
 	switch t.Kind() {

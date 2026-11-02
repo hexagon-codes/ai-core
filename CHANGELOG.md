@@ -31,6 +31,8 @@
 
 ### Fixed
 
+- `schema.Of`：静态 min/max 标签同步写入精确数值字段，uint64 最大值枚举保留数字类型；`time.Time` 及其指针按 JSON 的 `string/date-time` 表示生成 Schema，避免合法时间被内部结构类型拒绝。
+
 - `schema`：增加可选精确上下界数值字段，JSON往返保留Enum/Default中的大整数；非nil空枚举与组合约束不再被省略。
 - `streamx`：Buffer和Timeout继续读取Merge的单源结束标记之后的数据，避免重复SourceEOF或提前终止。
 
