@@ -2080,18 +2080,13 @@ func TestConcatItems_单个元素(t *testing.T) {
 	}
 }
 
-// TestConcatItems_未注册类型_返回最后一个 验证未注册 ConcatFunc 时返回最后一个元素
-func TestConcatItems_未注册类型_返回最后一个(t *testing.T) {
+// TestConcatItems_未注册类型_返回显式错误 验证未注册类型不会静默丢弃前面的元素。
+func TestConcatItems_未注册类型_返回显式错误(t *testing.T) {
 	type customType struct{ V int }
 
-	result, err := ConcatItems([]customType{{1}, {2}, {3}})
-	if err != nil {
-		t.Fatalf("ConcatItems 失败: %v", err)
-	}
-
-	// 未注册时默认返回最后一个元素
-	if result.V != 3 {
-		t.Errorf("期望 V=3，得到 V=%d", result.V)
+	_, err := ConcatItems([]customType{{1}, {2}, {3}})
+	if !errors.Is(err, ErrNoConcatFunc) {
+		t.Fatalf("ConcatItems error = %v, want ErrNoConcatFunc", err)
 	}
 }
 
