@@ -6,9 +6,11 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"os"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/hexagon-codes/ai-core/llm"
@@ -161,6 +163,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 }
 
 // Stream 执行流式补全请求
+// 原生响应提前 EOF 时，返回流的 Err/Collect 报告 io.ErrUnexpectedEOF，已接收分块仍可读取。
 func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*streamx.Stream, error) {
 	if req.Model == "" {
 		req.Model = p.model
@@ -672,13 +675,14 @@ func anthropicResponseHasReasoning(resp *anthropicResponse) bool {
 }
 
 type anthropicReasoningStreamParser struct {
-	base     *streamx.ClaudeParser
-	close    func() error
-	metadata map[string]any
-	receipt  llm.ReasoningReceipt
-	provider *Provider
-	model    string
-	native   anthropicNativeStream
+	base      *streamx.ClaudeParser
+	close     func() error
+	metadata  map[string]any
+	receipt   llm.ReasoningReceipt
+	provider  *Provider
+	model     string
+	native    anthropicNativeStream
+	completed atomic.Bool
 }
 
 func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
@@ -738,11 +742,23 @@ func (p *anthropicReasoningStreamParser) Parse(data []byte) (*streamx.Chunk, err
 		}
 		chunk.ProviderContinuation = p.provider.continuation(p.model, output)
 	}
+	if envelope.Type == "message_stop" {
+		p.completed.Store(true)
+	}
 	return chunk, nil
 }
 
 func (p *anthropicReasoningStreamParser) IsDone(data []byte) bool {
 	return p.base.IsDone(data)
+}
+
+// 原生消息必须收到 message_stop；工具块结束和 HTTP EOF 不代表消息已经完成。
+// 保留已观察到的内容与回执，原始读取/取消错误优先于补充的终态错误。
+func (p *anthropicReasoningStreamParser) NormalizeTerminalError(err error) error {
+	if err == nil && !p.completed.Load() {
+		return io.ErrUnexpectedEOF
+	}
+	return err
 }
 
 // parseResponse 解析响应
