@@ -14,6 +14,7 @@
 
 ### Added
 
+- `schema.Schema.AdditionalKeywords`：保留尚无类型字段的原始JSON Schema关键字，序列化、解码及本地验证保持约束；显式类型字段优先，额外数值保留字面精度。MCP等适配器可在其声明范围内完整透传，不由此承诺所有模型供应商支持相同关键词。
 - `llm.GenerationOptions`：提供不含消息、工具执行绑定或 Run 身份的生成参数表示；`Clone` 冻结其中可变参数，`ApplyTo` 将参数应用到 CompletionRequest，失败显式返回错误。
 - `llm`：补充模型调用委托及物理 HTTP attempt 观察与记账能力。`AttemptReceipt.AttemptID` 标识实际 HTTP 尝试，`UsageFields` 保留部分实报边界；`AttemptLedger.Summary` 汇总已知维度并分别报告 UnknownAttempts/PartialAttempts，不因缺失字段补造 TotalTokens，也不重复累计同一回执。Provider 方法调用次数不等于物理 HTTP 尝试数，业务账务与预算由上层消费这些事实。
 - `schema.Validator`：编译并验证动态 JSON Schema，复用 Draft 2020-12 合同；Provider 原生约束与本地验证分开，`format` 的支持范围由验证配置决定。
@@ -24,6 +25,7 @@
 
 ### Changed
 
+- `streamx.Copy`将Merge的SourceEOF作为非终态标记，推进各副本游标并保留后续源数据；真正EOF、错误和主动Close继续遵守既有所有权合同。
 - 官方 OpenAI Go SDK 更新至 `v3.91.0`，最低 Go 工具链更新至 `1.26.10`；同步必要的依赖解析。
 
 ### Fixed

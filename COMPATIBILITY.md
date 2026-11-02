@@ -13,6 +13,8 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 
 - 当前本地交付目标为 **v0.3.0**，最低 Go **1.26.10**，Toolkit 目标 **v0.3.7**。目标版本与本地候选验证不代表 tag 已创建、推送或公共代理可解析；发布时仍按下述既有流程核验。
 - v0.3.0 的 `StreamReader.Copy(n>=2)` 转移源读取权，消费者只读取返回分支；原 reader 的关闭表示整体关闭。Gemini 流 parser 按响应独立实例化。完整调用迁移见 [CHANGELOG](CHANGELOG.md)。
+- Copy传播Merge的SourceEOF时仍推进各分支游标；该标记只表示一个源结束，不关闭整个合并流。真正EOF、真实错误及Close继续按原所有权合同释放。
+- `schema.Schema.AdditionalKeywords`保存尚无类型字段的JSON Schema关键字，参与序列化与本地Validator验证；解码保留额外数值字面精度。已声明的类型字段拥有同名关键字，额外值不能覆盖它们。该能力负责表示保真，不等同于所有模型供应商都支持全部关键词；Provider能力仍以其实际声明为准。
 
 - `catalog`、`transport`、`llm/compatible` 及 `media/*` 中导出的 Provider 构造器、Option、请求与响应结构体均按 SemVer 维护。
 - `llm.ProviderError`、`llm.NetworkPolicy`、`llm.ErrNetworkPolicy` 是 `transport` 同名类型和值的别名；调用方可继续使用 `llm` 路径，也可逐步迁移到 `transport` 路径，`errors.As` / `errors.Is` 在两种路径间等价。
