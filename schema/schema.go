@@ -50,7 +50,7 @@ type Schema struct {
 	Pattern              string   `json:"pattern,omitempty"`
 	Format               string   `json:"format,omitempty"`
 	// AdditionalKeywords 保留尚无类型字段的原始Schema关键字，参与完整JSON序列化与验证。
-	// 已声明的类型字段拥有同名关键字，额外值不能覆盖它们。
+	// 已声明的类型字段优先；Items 为空时允许保留旧方言的 tuple items 数组。
 	AdditionalKeywords map[string]any `json:"-"`
 }
 
@@ -84,7 +84,8 @@ func (s Schema) MarshalJSON() ([]byte, error) {
 		return nil, err
 	}
 	for name, value := range s.AdditionalKeywords {
-		if schemaKeywordNames[name] {
+		_, tupleItems := value.([]any)
+		if schemaKeywordNames[name] && !(name == "items" && s.Items == nil && tupleItems) {
 			continue
 		}
 		raw, err := json.Marshal(value)
@@ -103,15 +104,28 @@ func (s *Schema) UnmarshalJSON(data []byte) error {
 	}
 	type Alias Schema
 	var decoded Alias
-	if err := json.Unmarshal(data, &decoded); err != nil {
-		return err
-	}
 	var document map[string]json.RawMessage
 	if err := json.Unmarshal(data, &document); err != nil {
 		return err
 	}
+	// Items 的类型字段表示同质数组，旧方言的 tuple 数组保持原始形状。
+	items := document["items"]
+	tupleItems := strings.HasPrefix(strings.TrimSpace(string(items)), "[")
+	typedData := data
+	if tupleItems {
+		delete(document, "items")
+		var err error
+		typedData, err = json.Marshal(document)
+		if err != nil {
+			return err
+		}
+		document["items"] = items
+	}
+	if err := json.Unmarshal(typedData, &decoded); err != nil {
+		return err
+	}
 	for name, raw := range document {
-		if schemaKeywordNames[name] {
+		if schemaKeywordNames[name] && !(name == "items" && tupleItems) {
 			continue
 		}
 		var value any

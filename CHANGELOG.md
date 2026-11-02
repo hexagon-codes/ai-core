@@ -30,6 +30,8 @@
 
 ### Fixed
 
+- `schema.Schema` 保留旧方言的 tuple `items` 数组，包含布尔元素与引用；值/指针序列化和 JSON 往返不再删除该约束，显式 `Items` 仍优先。默认方言不允许的数组形态保留原文并由 Validator 返回错误。
+
 - 原生 Anthropic 流缺少 `message_stop` 时显式返回异常终止，保留已经收到的文本、工具草稿及用量；完整消息仍按原结束原因返回，通用流的 EOF 合同不扩大。
 
 - OpenAI Chat 流按实际 `finish_reason` 或 `[DONE]` 确认完成；两者均缺失的 EOF 返回异常终止并保留部分内容及用量，不再让未完成工具草稿进入正常结果。
