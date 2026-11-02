@@ -450,7 +450,7 @@ func (p *Provider) completeResponses(ctx context.Context, req llm.CompletionRequ
 }
 
 func (p *Provider) completionFromResponse(ctx context.Context, req llm.CompletionRequest, response *ResponsesResponse) (*llm.CompletionResponse, error) {
-	completion := &llm.CompletionResponse{ID: response.ID, RequestID: response.RequestID, Model: response.Model, FinishReason: "stop"}
+	completion := &llm.CompletionResponse{ID: response.ID, RequestID: response.RequestID, Model: response.Model, FinishReason: responsesCompletionFinishReason(response)}
 	var envelope struct {
 		CreatedAt float64 `json:"created_at"`
 	}
@@ -468,7 +468,6 @@ func (p *Provider) completionFromResponse(ctx context.Context, req llm.Completio
 				contentText.WriteString(content.Text)
 			} else if content.Type == "refusal" {
 				contentText.WriteString(content.Refusal)
-				completion.FinishReason = "content_filter"
 			}
 		}
 	}
@@ -500,11 +499,46 @@ func (p *Provider) completionFromResponse(ctx context.Context, req llm.Completio
 		}
 		state.Output = append(state.Output, append(json.RawMessage(nil), item.RawJSON...))
 	}
-	if len(completion.ToolCalls) > 0 {
+	if len(completion.ToolCalls) > 0 && completion.FinishReason == "stop" {
 		completion.FinishReason = "tool_calls"
 	}
 	completion.ProviderContinuation = state
 	return completion, nil
+}
+
+// responsesCompletionFinishReason 保留模型终态事实，不由 HTTP 成功或正文非空推断完成。
+func responsesCompletionFinishReason(response *ResponsesResponse) string {
+	var details struct {
+		Reason string `json:"reason"`
+	}
+	if json.Unmarshal(response.IncompleteDetails, &details) == nil && details.Reason != "" {
+		switch details.Reason {
+		case "max_output_tokens":
+			return "length"
+		case "content_filter", "refusal":
+			return details.Reason
+		default:
+			return details.Reason
+		}
+	}
+	for _, item := range response.Output {
+		for _, content := range item.Content {
+			if content.Type == "refusal" {
+				return "refusal"
+			}
+		}
+	}
+	if response.Failure != nil && (response.Failure.Code == "content_filter" || response.Failure.Code == "refusal") {
+		return response.Failure.Code
+	}
+	switch response.Status {
+	case "completed":
+		return "stop"
+	case "":
+		return "unknown"
+	default:
+		return response.Status
+	}
 }
 
 func responsesReasoningTokens(raw json.RawMessage) int {

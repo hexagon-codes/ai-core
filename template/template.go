@@ -55,6 +55,8 @@ type Message struct {
 	// ToolCallID 工具调用 ID（当 Role=RoleTool 时必填）
 	// 关联到 assistant 消息中 ToolCalls[].ID，用于 checkpoint/resume/replay
 	ToolCallID string `json:"tool_call_id,omitempty"`
+	// ToolResultError 是工具执行点提供的失败事实，不通过正文关键字猜测。
+	ToolResultError bool `json:"tool_result_error,omitempty"`
 	// ToolCalls 工具调用列表（当 Role=RoleAssistant 且 LLM 请求工具调用时填充）
 	ToolCalls []ToolCallRef `json:"tool_calls,omitempty"`
 	// ProviderContinuation 只由可信适配器产生，公开消息序列化不会透出协议私有状态。
