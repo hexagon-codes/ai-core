@@ -646,7 +646,7 @@ func (ps *parentStream[T]) advance(current *streamNode[T], canceled <-chan struc
 			ps.mu.Lock()
 			if ps.done {
 				err = ps.endErr
-			} else if err != nil {
+			} else if _, sourceEOF := IsSourceEOF(err); err != nil && !sourceEOF {
 				ps.done, ps.endErr = true, err
 			}
 			ps.mu.Unlock()
@@ -711,7 +711,8 @@ func (cr *childReader[T]) recv() (T, error) {
 	current := cr.current
 	cr.mu.Unlock()
 	next, err := cr.parent.advance(current, cr.done)
-	if err != nil {
+	_, sourceEOF := IsSourceEOF(err)
+	if err != nil && !sourceEOF {
 		if cr.stop(err) {
 			_ = cr.parent.release(cr)
 		}
@@ -725,7 +726,7 @@ func (cr *childReader[T]) recv() (T, error) {
 		return zero, cr.endErr
 	}
 	cr.current = next
-	return next.value, nil
+	return next.value, err
 }
 
 func (cr *childReader[T]) stop(err error) bool {
