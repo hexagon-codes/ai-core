@@ -25,9 +25,11 @@ package streamx
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"reflect"
 	"runtime"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -51,7 +53,40 @@ var (
 	ErrSourceEOF = errors.New("source stream EOF")
 )
 
-// SourceEOF 源流结束错误，包含源名称
+// ClosePanicError 保留关闭回调的异常与栈，关闭前发生的动作不可盲目重放。
+type ClosePanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *ClosePanicError) Error() string {
+	return fmt.Sprintf("stream close callback panicked: %v", e.Value)
+}
+func (*ClosePanicError) UnsafeToReplay() bool { return true }
+func (e *ClosePanicError) Unwrap() error      { cause, _ := e.Value.(error); return cause }
+
+// SourcePanicError 将库创建的后台读取及观察回调异常转为不可重放的流失败。
+type SourcePanicError struct {
+	Value any
+	Stack []byte
+}
+
+func (e *SourcePanicError) Error() string {
+	return fmt.Sprintf("stream source callback panicked: %v", e.Value)
+}
+func (*SourcePanicError) UnsafeToReplay() bool { return true }
+func (e *SourcePanicError) Unwrap() error      { cause, _ := e.Value.(error); return cause }
+
+func recvBackground[T any](source *StreamReader[T]) (value T, err error) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			err = &SourcePanicError{Value: recovered, Stack: debug.Stack()}
+		}
+	}()
+	return source.Recv()
+}
+
+// SourceEOF 源流结束错误，包含源名称。
 type SourceEOF struct {
 	Source string
 }
@@ -259,11 +294,14 @@ func (sr *StreamReader[T]) SetSource(source string) *StreamReader[T] {
 }
 
 // Collect 收集全部元素并释放读端；取消会主动关闭源以唤醒阻塞读取。
-func (sr *StreamReader[T]) Collect(ctx context.Context) ([]T, error) {
+func (sr *StreamReader[T]) Collect(ctx context.Context) (items []T, err error) {
 	stop := context.AfterFunc(ctx, func() { _ = sr.Close() })
 	defer stop()
-	defer func() { _ = sr.Close() }()
-	var items []T
+	defer func() {
+		if closeErr := sr.Close(); closeErr != nil {
+			err = errors.Join(err, &collectCloseError{cause: closeErr})
+		}
+	}()
 	for {
 		select {
 		case <-ctx.Done():
@@ -286,6 +324,13 @@ func (sr *StreamReader[T]) Collect(ctx context.Context) ([]T, error) {
 		}
 	}
 }
+
+// collectCloseError 表示值可能已经全部读取，清理失败不能触发整次操作重放。
+type collectCloseError struct{ cause error }
+
+func (e *collectCloseError) Error() string      { return e.cause.Error() }
+func (e *collectCloseError) Unwrap() error      { return e.cause }
+func (*collectCloseError) UnsafeToReplay() bool { return true }
 
 // ForEach 对每个元素执行操作
 func (sr *StreamReader[T]) ForEach(ctx context.Context, fn func(T) error) error {
@@ -385,7 +430,7 @@ func Pipe[T any](cap int) (*StreamReader[T], *StreamWriter[T]) {
 	var closeErr atomic.Value
 
 	reader := &pipeReader[T]{ch: ch, done: done, closeErr: &closeErr}
-	writer := &pipeWriter[T]{ch: ch, done: done, closeErr: &closeErr, closed: 0}
+	writer := &pipeWriter[T]{ch: ch, done: done, closeErr: &closeErr, stopped: make(chan struct{}), finished: make(chan struct{})}
 
 	return &StreamReader[T]{typ: readerTypePipe, pipe: reader},
 		&StreamWriter[T]{pipe: writer}
@@ -434,6 +479,11 @@ func (pr *pipeReader[T]) recv() (T, error) {
 func (pr *pipeReader[T]) close() error {
 	pr.closeOnce.Do(func() {
 		close(pr.done)
+		defer func() {
+			if value := recover(); value != nil {
+				pr.closeResult = &ClosePanicError{Value: value, Stack: debug.Stack()}
+			}
+		}()
 		if pr.onClose != nil {
 			pr.closeResult = pr.onClose()
 		}
@@ -446,9 +496,14 @@ type pipeWriter[T any] struct {
 	done     chan struct{}
 	closeErr *atomic.Value
 	closed   int32
+	mu       sync.RWMutex
+	stopped  chan struct{}
+	finished chan struct{}
 }
 
 func (pw *pipeWriter[T]) send(item T) error {
+	pw.mu.RLock()
+	defer pw.mu.RUnlock()
 	if atomic.LoadInt32(&pw.closed) == 1 {
 		return ErrStreamClosed
 	}
@@ -462,19 +517,30 @@ func (pw *pipeWriter[T]) send(item T) error {
 		return nil
 	case <-pw.done:
 		return ErrStreamClosed
+	case <-pw.stopped:
+		return ErrStreamClosed
 	}
 }
 
 func (pw *pipeWriter[T]) close() error {
-	if atomic.CompareAndSwapInt32(&pw.closed, 0, 1) {
-		close(pw.ch)
-	}
-	return nil
+	return pw.closeWithError(nil)
 }
 
 func (pw *pipeWriter[T]) closeWithError(err error) error {
-	pw.closeErr.Store(err)
-	return pw.close()
+	if atomic.CompareAndSwapInt32(&pw.closed, 0, 1) {
+		// 先唤醒阻塞发送，再等待读锁退出；读端仍可排空已缓冲的值。
+		close(pw.stopped)
+		pw.mu.Lock()
+		if err != nil {
+			pw.closeErr.Store(err)
+		}
+		close(pw.ch)
+		pw.mu.Unlock()
+		close(pw.finished)
+	} else {
+		<-pw.finished
+	}
+	return nil
 }
 
 // ============== Array 数组流 ==============
@@ -597,10 +663,11 @@ func (mr *multiReader[T]) recv() (T, error) {
 }
 
 func (mr *multiReader[T]) close() error {
+	var failures []error
 	for _, r := range mr.readers {
-		r.Close()
+		failures = append(failures, r.Close())
 	}
-	return nil
+	return errors.Join(failures...)
 }
 
 // ============== Child 子流（用于 Copy）- 零分配 Linked List 设计 ==============
@@ -642,7 +709,7 @@ func (ps *parentStream[T]) advance(current *streamNode[T], canceled <-chan struc
 				current.next = &streamNode[T]{err: endErr}
 				return
 			}
-			item, err := source.Recv()
+			item, err := recvBackground(source)
 			ps.mu.Lock()
 			if ps.done {
 				err = ps.endErr
@@ -870,7 +937,7 @@ func (br *bufferReader[T]) fill() {
 		case <-br.done:
 			return
 		default:
-			item, err := br.source.Recv()
+			item, err := recvBackground(br.source)
 			if err != nil {
 				if _, sourceEOF := IsSourceEOF(err); sourceEOF {
 					continue
@@ -960,7 +1027,7 @@ func (tr *timeoutReader[T]) init() {
 		go func() {
 			defer close(resultCh)
 			for {
-				item, err := source.Recv()
+				item, err := recvBackground(source)
 				select {
 				case resultCh <- recvResult[T]{item: item, err: err}:
 				case <-done:
@@ -1173,12 +1240,20 @@ type backpressureReader[T any] struct {
 
 func (bp *backpressureReader[T]) fill() {
 	defer close(bp.buffer)
+	defer func() {
+		if value := recover(); value != nil {
+			bp.err = &SourcePanicError{Value: value, Stack: debug.Stack()}
+		}
+	}()
 	for {
 		select {
 		case <-bp.done:
 			return
 		default:
-			item, err := bp.source.Recv()
+			item, err := recvBackground(bp.source)
+			if _, sourceEOF := IsSourceEOF(err); sourceEOF {
+				continue
+			}
 			if err != nil {
 				bp.err = err
 				return
@@ -1660,26 +1735,32 @@ func (db *distinctByReader[T, K]) close() error {
 
 // Zip 合并两个流
 func Zip[T, U, R any](sr1 *StreamReader[T], sr2 *StreamReader[U], fn func(T, U) R) *StreamReader[R] {
+	var pending T
+	hasPending := false
 	return &StreamReader[R]{
 		typ: readerTypeZip,
 		zipR: &zipReader[R]{
 			fn: func() (R, error) {
-				item1, err1 := sr1.Recv()
-				if err1 != nil {
-					var zero R
-					return zero, err1
+				if !hasPending {
+					item1, err1 := sr1.Recv()
+					if err1 != nil {
+						var zero R
+						return zero, err1
+					}
+					pending, hasPending = item1, true
 				}
 				item2, err2 := sr2.Recv()
 				if err2 != nil {
 					var zero R
 					return zero, err2
 				}
+				item1 := pending
+				var zero T
+				pending, hasPending = zero, false
 				return fn(item1, item2), nil
 			},
 			close: func() error {
-				sr1.Close()
-				sr2.Close()
-				return nil
+				return errors.Join(sr1.Close(), sr2.Close())
 			},
 		},
 	}
@@ -1832,70 +1913,89 @@ type debounceReader[T any] struct {
 	output   chan T
 	started  int32
 	closed   int32
+	err      error
 }
 
 func (dr *debounceReader[T]) start() {
 	if !atomic.CompareAndSwapInt32(&dr.started, 0, 1) {
 		return
 	}
+	type incoming struct {
+		value T
+		err   error
+	}
+	input := make(chan incoming)
 	go func() {
-		var latest T
-		var hasValue bool
+		defer close(input)
+		for {
+			select {
+			case <-dr.done:
+				return
+			default:
+			}
+			value, err := recvBackground(dr.source)
+			if _, sourceEOF := IsSourceEOF(err); sourceEOF {
+				continue
+			}
+			select {
+			case input <- incoming{value, err}:
+			case <-dr.done:
+				return
+			}
+			if err != nil {
+				return
+			}
+		}
+	}()
+	go func() {
+		defer close(dr.output)
+		defer dr.source.Close()
 		timer := time.NewTimer(dr.duration)
 		if !timer.Stop() {
 			<-timer.C
 		}
-
+		defer timer.Stop()
+		var latest T
+		pending := false
+		send := func() bool {
+			select {
+			case dr.output <- latest:
+				return true
+			case <-dr.done:
+				return false
+			}
+		}
 		for {
 			select {
 			case <-dr.done:
-				timer.Stop()
-				close(dr.output)
 				return
-			default:
-			}
-
-			item, err := dr.source.Recv()
-			if err != nil {
-				// 源流结束，发送最后一个值
+			case item, open := <-input:
+				if !open {
+					return
+				}
+				if item.err != nil {
+					if item.err != io.EOF {
+						dr.err = item.err
+					}
+					if pending {
+						send()
+					}
+					return
+				}
+				latest, pending = item.value, true
 				if !timer.Stop() {
 					select {
 					case <-timer.C:
 					default:
 					}
 				}
-				if hasValue {
-					dr.output <- latest
-				}
-				close(dr.output)
-				return
-			}
-			latest = item
-			hasValue = true
-
-			// 重置 timer 前先 stop，确保不会有残留的触发
-			if !timer.Stop() {
-				select {
-				case <-timer.C:
-				default:
-				}
-			}
-			timer.Reset(dr.duration)
-
-			// 等待 timer 触发或新数据到来
-		waitLoop:
-			for {
-				select {
-				case <-dr.done:
-					timer.Stop()
-					close(dr.output)
-					return
-				case <-timer.C:
-					if hasValue {
-						dr.output <- latest
-						hasValue = false
+				timer.Reset(dr.duration)
+			case <-timer.C:
+				if pending {
+					if !send() {
+						return
 					}
-					break waitLoop
+					pending = false
 				}
 			}
 		}
@@ -1907,6 +2007,9 @@ func (dr *debounceReader[T]) recv() (T, error) {
 	item, ok := <-dr.output
 	if !ok {
 		var zero T
+		if dr.err != nil {
+			return zero, dr.err
+		}
 		return zero, io.EOF
 	}
 	return item, nil
