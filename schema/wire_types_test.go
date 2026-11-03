@@ -112,3 +112,159 @@ func TestStringEncodedNumericBoundsKeepRangeSemantics(t *testing.T) {
 		}
 	}
 }
+
+func TestStringEncodedNumericBoundsRejectInvalidValues(t *testing.T) {
+	type input struct {
+		N int64   `json:"n,string" min:"10" max:"20" required:"true"`
+		F float64 `json:"f,string" min:"1.5" max:"2.5" required:"true"`
+	}
+	validator, err := NewValidator(Of[input]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	valid := []string{
+		`{"n":"10","f":"1.5"}`,
+		`{"n":"20","f":"2.5"}`,
+		`{"n":"15","f":"2"}`,
+	}
+	for _, value := range valid {
+		if err := validator.ValidateJSON([]byte(value)); err != nil {
+			t.Fatalf("valid value rejected: %s: %v", value, err)
+		}
+	}
+	invalid := []string{
+		`{"n":"9","f":"2"}`,
+		`{"n":"21","f":"2"}`,
+		`{"n":"abc","f":"2"}`,
+		`{"n":"15","f":"1.2"}`,
+		`{"n":"15","f":"2.6"}`,
+		`{"n":"15","f":"x"}`,
+	}
+	for _, value := range invalid {
+		if err := validator.ValidateJSON([]byte(value)); err == nil {
+			t.Fatalf("invalid value accepted: %s", value)
+		}
+	}
+}
+
+func TestStandardStringSchemasKeepNumericMinimumAsAnnotation(t *testing.T) {
+	type tagged struct {
+		N int64 `json:"n,string" min:"10" max:"20" required:"true"`
+	}
+	if !hasNumericStringMarker(map[string]any{
+		"type":               "string",
+		"minimum":            json.Number("10"),
+		numericStringKeyword: true,
+	}) {
+		t.Fatal("generated numeric-string marker missing")
+	}
+	cases := []struct {
+		name   string
+		schema any
+		value  string
+	}{
+		{"string", map[string]any{"type": "string", "minimum": 10}, `"ordinary text"`},
+		{"union", map[string]any{"type": []any{"string", "number"}, "minimum": 10}, `"ordinary text"`},
+		{"no-type", map[string]any{"minimum": 10}, `"ordinary text"`},
+		{"nested", map[string]any{"type": "object", "properties": map[string]any{"n": map[string]any{"minimum": 10}}}, `{"n":"ordinary text"}`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			validator, err := NewValidator(tc.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validator.ValidateJSON([]byte(tc.value)); err != nil {
+				t.Fatalf("standard string value rejected: %v", err)
+			}
+		})
+	}
+}
+
+func TestNumericStringMarkerDoesNotOverrideAlternativeAnyOfBranch(t *testing.T) {
+	document := map[string]any{
+		"anyOf": []any{
+			map[string]any{
+				"type":               "string",
+				"minimum":            10,
+				numericStringKeyword: true,
+			},
+			map[string]any{"type": "string", "const": "5"},
+		},
+	}
+	validator, err := NewValidator(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.ValidateJSON([]byte(`"5"`)); err != nil {
+		t.Fatalf("alternative anyOf branch was rejected by inactive marker: %v", err)
+	}
+}
+
+func TestNumericStringMarkerAppliesThroughConditionalThen(t *testing.T) {
+	type tagged struct {
+		N int64 `json:"n,string" min:"10" max:"20" required:"true"`
+	}
+	document := map[string]any{
+		"if":   map[string]any{"type": "object", "required": []any{"n"}},
+		"then": Of[tagged](),
+	}
+	validator, err := NewValidator(document)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.ValidateJSON([]byte(`{"n":"9"}`)); err == nil {
+		t.Fatal("conditional then marker was not enforced")
+	}
+}
+
+func TestStringEncodedNumericBoundsApplyThroughCompositionsAndAnchors(t *testing.T) {
+	type tagged struct {
+		N int64 `json:"n,string" min:"10" max:"20" required:"true"`
+	}
+	taggedSchema := Of[tagged]()
+	for _, tc := range []struct {
+		name   string
+		schema any
+		value  string
+	}{
+		{"direct", taggedSchema, `{"n":"9"}`},
+		{"anyOf", map[string]any{"anyOf": []any{taggedSchema, map[string]any{"type": "null"}}}, `{"n":"9"}`},
+		{"oneOf", map[string]any{"oneOf": []any{taggedSchema, map[string]any{"type": "null"}}}, `{"n":"21"}`},
+		{"prefixItems", map[string]any{"type": "array", "prefixItems": []any{taggedSchema}}, `[{"n":"abc"}]`},
+		{"anchor", map[string]any{"$defs": map[string]any{"item": map[string]any{"$anchor": "item", "allOf": []any{taggedSchema}}}, "$ref": "#item"}, `{"n":"9"}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			validator, err := NewValidator(tc.schema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := validator.ValidateJSON([]byte(tc.value)); err == nil {
+				t.Fatalf("invalid string-encoded numeric value accepted: %s", tc.value)
+			}
+		})
+	}
+}
+
+func TestStringEncodedNumericBoundsApplyThroughRefsAndArrays(t *testing.T) {
+	type node struct {
+		N    int64 `json:"n,string" min:"10" max:"20" required:"true"`
+		Next *node `json:"next,omitempty"`
+	}
+	type wrapper struct {
+		Items []node `json:"items" required:"true"`
+	}
+	validator, err := NewValidator(Of[wrapper]())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := validator.ValidateJSON([]byte(`{"items":[{"n":"10","next":{"n":"20"}}]}`)); err != nil {
+		t.Fatalf("valid nested value rejected: %v", err)
+	}
+	if err := validator.ValidateJSON([]byte(`{"items":[{"n":"10","next":{"n":"9"}}]}`)); err == nil {
+		t.Fatal("nested out-of-range value accepted")
+	}
+	if err := validator.ValidateJSON([]byte(`{"items":[{"n":"21"}]}`)); err == nil {
+		t.Fatal("array out-of-range value accepted")
+	}
+}

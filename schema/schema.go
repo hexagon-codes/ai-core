@@ -19,6 +19,11 @@ import (
 // WithDialect 时才发出，避免污染工具调用请求。
 const Draft2020_12 = "https://json-schema.org/draft/2020-12/schema"
 
+// numericStringKeyword 标记 json:",string" 数值字段的字符串内数值约束。
+// 标准 JSON Schema 的 minimum/maximum 只作用于 number；没有该标记时不能把
+// 普通字符串 Schema 上的 minimum 解释为字符串内数字边界。
+const numericStringKeyword = "x-hexagon-string-number"
+
 // Schema 表示 JSON Schema 定义（兼容 JSON Schema 2020-12 方言）
 // 用于描述 LLM 工具参数的结构和约束
 type Schema struct {
@@ -503,6 +508,14 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 					}
 				}
 			}
+		}
+		// 只有生成器明确知道该字段是 json:",string" 数值时才标记字符串内数值约束。
+		// 普通 JSON Schema 不携带该标记，标准 minimum/maximum 语义保持不变。
+		if stringEncoded && (propSchema.Minimum != nil || propSchema.Maximum != nil) {
+			if propSchema.AdditionalKeywords == nil {
+				propSchema.AdditionalKeywords = make(map[string]any)
+			}
+			propSchema.AdditionalKeywords[numericStringKeyword] = true
 		}
 
 		schema.Properties[name] = propSchema
