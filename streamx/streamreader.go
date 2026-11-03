@@ -312,6 +312,10 @@ func (sr *StreamReader[T]) Collect(ctx context.Context) (items []T, err error) {
 				return items, cause
 			}
 			if errors.Is(err, io.EOF) {
+				// 纯 EOF 是正常结束；EOF 与关闭失败等错误合并时必须保留后者。
+				if err != io.EOF {
+					return items, err
+				}
 				return items, nil
 			}
 			if _, ok := IsSourceEOF(err); ok {
@@ -332,14 +336,19 @@ func (e *collectCloseError) Error() string      { return e.cause.Error() }
 func (e *collectCloseError) Unwrap() error      { return e.cause }
 func (*collectCloseError) UnsafeToReplay() bool { return true }
 
-// ForEach 对每个元素执行操作
+// ForEach 对每个元素执行操作。取消时主动关闭源以唤醒阻塞读取，并返回取消原因。
 func (sr *StreamReader[T]) ForEach(ctx context.Context, fn func(T) error) error {
+	stop := context.AfterFunc(ctx, func() { _ = sr.Close() })
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
 			item, err := sr.Recv()
+			if cause := ctx.Err(); cause != nil {
+				return cause
+			}
 			if err == io.EOF {
 				return nil
 			}
@@ -375,7 +384,7 @@ func (sr *StreamReader[T]) Copy(n int) []*StreamReader[T] {
 
 	// 创建父流管理器
 	raw := *sr
-	parent := &parentStream[T]{source: &raw, children: make(map[*childReader[T]]struct{})}
+	parent := &parentStream[T]{source: &raw, children: make(map[*childReader[T]]struct{}), sourceCloseDone: make(chan struct{})}
 	// 控制器持有改写前的底层句柄，原 reader 仅保留整体取消能力。
 	*sr = StreamReader[T]{typ: readerTypeTransferred, copyOwner: parent, source: raw.source}
 
@@ -693,6 +702,11 @@ type parentStream[T any] struct {
 	children  map[*childReader[T]]struct{}
 	closeOnce sync.Once
 	closeErr  error
+
+	// 源读取到 EOF 时即可关闭；关闭错误必须保留给所有分支的 EOF 终态。
+	sourceCloseOnce sync.Once
+	sourceCloseDone chan struct{}
+	sourceCloseErr  error
 }
 
 // advance 推进链表，从源流读取下一个元素
@@ -710,6 +724,12 @@ func (ps *parentStream[T]) advance(current *streamNode[T], canceled <-chan struc
 				return
 			}
 			item, err := recvBackground(source)
+			if errors.Is(err, io.EOF) {
+				// 数据已耗尽，立即释放源，让所有分支的 EOF 都携带同一关闭错误。
+				if closeErr := ps.closeSource(); closeErr != nil {
+					err = errors.Join(err, closeErr)
+				}
+			}
 			ps.mu.Lock()
 			if ps.done {
 				err = ps.endErr
@@ -739,19 +759,35 @@ func (ps *parentStream[T]) release(child *childReader[T]) error {
 	return nil
 }
 
+// closeSource 只关闭底层源一次并等待结果；可由 EOF 读取或最后分支释放触发。
+func (ps *parentStream[T]) closeSource() error {
+	ps.sourceCloseOnce.Do(func() {
+		ps.mu.Lock()
+		source := ps.source
+		ps.mu.Unlock()
+		if source != nil {
+			ps.sourceCloseErr = source.Close()
+		}
+		close(ps.sourceCloseDone)
+	})
+	<-ps.sourceCloseDone
+	return ps.sourceCloseErr
+}
+
 func (ps *parentStream[T]) close() error {
 	ps.closeOnce.Do(func() {
 		ps.mu.Lock()
 		ps.done, ps.endErr = true, ErrStreamClosed
 		children := ps.children
-		source := ps.source
 		ps.children = nil
-		ps.source = nil
 		ps.mu.Unlock()
 		for child := range children {
 			child.stop(ErrStreamClosed)
 		}
-		ps.closeErr = source.Close()
+		ps.closeErr = ps.closeSource()
+		ps.mu.Lock()
+		ps.source = nil
+		ps.mu.Unlock()
 	})
 	return ps.closeErr
 }
@@ -781,7 +817,9 @@ func (cr *childReader[T]) recv() (T, error) {
 	_, sourceEOF := IsSourceEOF(err)
 	if err != nil && !sourceEOF {
 		if cr.stop(err) {
-			_ = cr.parent.release(cr)
+			if releaseErr := cr.parent.release(cr); releaseErr != nil && !errors.Is(err, releaseErr) {
+				err = errors.Join(err, releaseErr)
+			}
 		}
 		var zero T
 		return zero, err
@@ -881,15 +919,20 @@ func (fr *filterReader[T]) close() error {
 	return fr.source.Close()
 }
 
-// Reduce 流归约
+// Reduce 流归约。取消时主动关闭源以唤醒阻塞读取，并返回取消原因。
 func Reduce[T, U any](ctx context.Context, sr *StreamReader[T], init U, fn func(U, T) U) (U, error) {
 	result := init
+	stop := context.AfterFunc(ctx, func() { _ = sr.Close() })
+	defer stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return result, ctx.Err()
 		default:
 			item, err := sr.Recv()
+			if cause := ctx.Err(); cause != nil {
+				return result, cause
+			}
 			if err == io.EOF {
 				return result, nil
 			}
