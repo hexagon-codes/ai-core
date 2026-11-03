@@ -30,6 +30,12 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - `media/video.Service.Submit` 返回的不透明任务引用必须原样传入 `Poll`，调用方不得依赖其内部编码。`Poll` 继续接受可唯一解析的历史 `{provider}::{taskID}` 引用；存在歧义的旧引用会返回错误。提交成功后首次轮询失败时，`SubmitAndWait` 返回状态仍包含可恢复的 `TaskID`。
 - `media/voice.ChainedTTS` 在 context 标记 `transport.OperationSafetyNonIdempotent` 时，仅对明确未被接纳的合成失败执行 Provider 回退；结果未知时停止，避免重复执行可能已接纳的请求。取消和超时也不会触发回退。`SynthesizeResult.Provider` 与 `IsDefinitiveSynthesisFailure` 为新增的兼容性 API。
 
+## 2026-11-04 Schema 与流修复
+
+- `json:",string"` 数值字段带 `min`/`max` 时，`Schema.Of` 生成显式 `x-hexagon-string-number` 标记；Validator 只对带标记的字符串执行数值边界检查。普通 `type:string` 上的 `minimum`/`maximum` 保持 JSON Schema 注解语义，不再被误当字符串内数值约束。
+- 字符串数值检查递归覆盖 `anyOf`/`oneOf`/`allOf`、`prefixItems`、`items`、JSON Pointer/`$anchor` 引用及 `$ref`/`$dynamicRef` 同级兄弟关键字；`anyOf`/`oneOf` 只对标准验证器实际匹配的分支执行自定义标记，不能用一个未选中分支误拒另一个合法分支。无法独立编译的分支不执行自定义标记，但标准整体约束仍生效；类型无法稳定恢复时显式返回错误。
+- `Copy` 的所有分支在源 EOF 时携带同一源关闭错误；`Collect` 不再把 `EOF + 清理失败` 当正常结束。`ForEach`/`Reduce` 在 ctx 取消时主动关闭源并返回取消原因，不无限阻塞，也不把取消伪装成 nil 成功。
+
 ## 精确Schema与合流适配
 
 - `Schema.Of`识别标准JSON表示：`json.Number`为number，`json.RawMessage`为任意JSON，字节切片为base64字符串或null；`json:",string"`的基本类型字段及enum/default按实际JSON字符串表示生成。contentEncoding是标准Schema注解，不等于自动启用内容断言；任意自定义Marshaler不自动推断。需要更窄的供应商原生约束时由调用者显式提供Schema。
