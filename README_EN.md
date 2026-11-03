@@ -10,7 +10,7 @@ An open-source AI foundation library for any Go application or agent framework, 
 
 - **Unified LLM Interface** — One API, multiple providers (OpenAI, Anthropic, DeepSeek, Gemini, Qwen, Doubao, ERNIE, Ollama)
 - **Middleware Pipeline** — Composable provider decorators: retry (with non-retryable error detection), rate limiting, timeout, callbacks, caching (with singleflight to prevent thundering herd, including semantic cache)
-- **Streaming** — Unified SSE streaming with both callback and channel modes; generic `StreamReader` quartet (Concat/Merge/Copy + Close contract) and gRPC frame parsing
+- **Streaming** — Unified SSE streaming with both callback and channel modes; generic `StreamReader` quartet (Concat/Merge/Copy + Close contract) and gRPC frame parsing; Buffer/Timeout/Copy keep Merge's per-source `SourceEOF` non-terminal
 - **Tool System** — Type-safe tool definitions with automatic JSON Schema generation from Go structs
 - **Memory System** *(Experimental)* — Multiple memory strategies (buffer, summary, vector retrieval, multi-layer, entity memory), entries support provenance lineage and multimodal content. This interface is experimental and may change in future versions
 - **Media Generation** — Dedicated media subdomain (image / video / voice / voice chat) with a unified Submit→Poll async task model plus synchronous wrappers
@@ -19,7 +19,7 @@ An open-source AI foundation library for any Go application or agent framework, 
 - **Smart Routing** — Multi-provider router with round-robin, weighted, least-latency, fallback strategies; task-aware intelligent routing
 - **Cancelable Token Counting** — Optional `ContextTokenCounter` supports cancellation and deadlines while the compatibility helper preserves legacy providers
 - **Usage Tracking** — Token consumption statistics and cost estimation (atomic cumulative counter, consistent after pruning) with request tracing
-- **Structured Output** — ResponseFormat supporting JSON mode and JSON Schema constraints (including the JSON Schema 2020-12 dialect)
+- **Structured Output** — ResponseFormat supporting JSON mode and JSON Schema constraints (including the JSON Schema 2020-12 dialect); `minimum`/`maximum` and enums preserve numeric literals, and explicit empty `enum`/`anyOf` constraints are not dropped
 
 ## Installation
 

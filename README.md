@@ -10,7 +10,7 @@
 
 - **统一的 LLM 接口** - 一套代码，多家 Provider（OpenAI、Anthropic、DeepSeek、Gemini、通义千问、豆包、文心一言、Ollama）
 - **中间件机制** - 可组合的 Provider 装饰器：重试（含不可重试错误检测）、限流、超时、回调、缓存（含 singleflight 防击穿，支持语义缓存）
-- **流式响应** - 统一的 SSE 流式处理，支持回调和 channel 两种模式；通用 `StreamReader` 四件套（Concat/Merge/Copy + Close 契约）与 gRPC 分帧解析
+- **流式响应** - 统一的 SSE 流式处理，支持回调和 channel 两种模式；通用 `StreamReader` 四件套（Concat/Merge/Copy + Close 契约）与 gRPC 分帧解析；Buffer/Timeout/Copy 将 Merge 的单源 `SourceEOF` 保持为非终态
 - **工具系统** - 类型安全的工具定义，从 Go 结构体自动生成 JSON Schema
 - **记忆系统** *(Experimental)* - 多种记忆策略（缓冲、摘要、向量检索、多层组合、实体记忆），条目支持溯源血缘与多模态。此接口处于实验阶段，后续版本可能发生变更
 - **媒体生成** - 独立媒体子域（图像 / 视频 / 语音 / 语音对话），统一 Submit→Poll 异步任务模型 + 同步包装
@@ -19,7 +19,7 @@
 - **智能路由** - 多 Provider 路由器，支持轮询、加权、最低延迟、降级等策略；任务感知智能路由
 - **可取消 Token 计数** - 可选 `ContextTokenCounter` 支持取消和截止时间，兼容 helper 保留旧 Provider
 - **用量追踪** - Token 消耗统计和成本估算（原子累加器，裁剪后数值一致），支持请求追踪器
-- **结构化输出** - ResponseFormat 支持 JSON 模式和 JSON Schema 约束（含 JSON Schema 2020-12 方言）
+- **结构化输出** - ResponseFormat 支持 JSON 模式和 JSON Schema 约束（含 JSON Schema 2020-12 方言）；`minimum`/`maximum` 与枚举保留数值字面量，显式空 `enum`/`anyOf` 不会被删除
 
 ## 安装
 

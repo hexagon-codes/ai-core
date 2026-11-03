@@ -426,6 +426,10 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 				// 数字最小值
 				minVal := parseFloat(minStr)
 				propSchema.Minimum = &minVal
+					if json.Valid([]byte(strings.TrimSpace(minStr))) {
+						var number json.Number
+						if json.Unmarshal([]byte(minStr), &number) == nil && number != "" { propSchema.MinimumNumber = number }
+					}
 			}
 		}
 		if maxStr := field.Tag.Get("max"); maxStr != "" {
@@ -437,6 +441,10 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 				// 数字最大值
 				maxVal := parseFloat(maxStr)
 				propSchema.Maximum = &maxVal
+					if json.Valid([]byte(strings.TrimSpace(maxStr))) {
+						var number json.Number
+						if json.Unmarshal([]byte(maxStr), &number) == nil && number != "" { propSchema.MaximumNumber = number }
+					}
 			}
 		}
 
@@ -480,6 +488,9 @@ func parseDefault(s string, schemaType string) any {
 	case "integer":
 		if v, err := strconv.Atoi(s); err == nil {
 			return v
+		}
+		if v, err := strconv.ParseUint(s, 10, 64); err == nil {
+			return json.Number(strconv.FormatUint(v, 10))
 		}
 	case "number":
 		if v, err := strconv.ParseFloat(s, 64); err == nil {
