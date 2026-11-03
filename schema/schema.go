@@ -468,9 +468,10 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			propSchema.Pattern = pattern
 		}
 
-		// 解析 min/max tag
+		// 解析 min/max tag。按原始 JSON 类型区分长度与数值约束；
+		// json:",string" 只改变 wire 表示，不能把数值字段的 min/max 变成字符串长度。
 		if minStr := field.Tag.Get("min"); minStr != "" {
-			if propSchema.Type == "string" {
+			if originalType == "string" {
 				// 字符串最小长度
 				minLen := parseInt(minStr)
 				propSchema.MinLength = &minLen
@@ -487,7 +488,7 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			}
 		}
 		if maxStr := field.Tag.Get("max"); maxStr != "" {
-			if propSchema.Type == "string" {
+			if originalType == "string" {
 				// 字符串最大长度
 				maxLen := parseInt(maxStr)
 				propSchema.MaxLength = &maxLen

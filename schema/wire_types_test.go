@@ -78,3 +78,37 @@ func TestOutOfRangeNumberTagKeepsNumericRepresentation(t *testing.T) {
 		t.Fatal("literal lost in JSON roundtrip")
 	}
 }
+
+func TestStringEncodedNumericBoundsKeepRangeSemantics(t *testing.T) {
+	type input struct {
+		ID   int64  `json:"id,string" min:"10" max:"20"`
+		Name string `json:"name" min:"2" max:"5"`
+	}
+	s := Of[input]()
+	id := s.Properties["id"]
+	if id.Type != "string" {
+		t.Fatalf("id type=%q", id.Type)
+	}
+	if id.MinLength != nil || id.MaxLength != nil {
+		t.Fatalf("numeric bounds became string lengths: %+v", id)
+	}
+	if id.Minimum == nil || *id.Minimum != 10 || id.MinimumNumber != "10" {
+		t.Fatalf("minimum lost: %+v", id)
+	}
+	if id.Maximum == nil || *id.Maximum != 20 || id.MaximumNumber != "20" {
+		t.Fatalf("maximum lost: %+v", id)
+	}
+	name := s.Properties["name"]
+	if name.MinLength == nil || *name.MinLength != 2 || name.MaxLength == nil || *name.MaxLength != 5 {
+		t.Fatalf("string length bounds changed: %+v", name)
+	}
+	validator, err := NewValidator(s)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, value := range []string{"10", "20"} {
+		if err := validator.ValidateJSON([]byte(`{"id":"` + value + `","name":"ab"}`)); err != nil {
+			t.Fatalf("valid string-encoded number %q rejected: %v", value, err)
+		}
+	}
+}
