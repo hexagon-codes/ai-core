@@ -13,6 +13,7 @@ import (
 
 	"github.com/hexagon-codes/ai-core/llm"
 	"github.com/hexagon-codes/ai-core/streamx"
+	"github.com/hexagon-codes/ai-core/tokenizer"
 )
 
 // ============== 任务类型定义 ==============
@@ -420,6 +421,10 @@ func WithMaxHistorySize(size int) SmartRouterOption {
 // WithModelProfiles 设置模型能力档案
 func WithModelProfiles(profiles map[string]*ModelProfile) SmartRouterOption {
 	return func(r *SmartRouter) {
+		if profiles == nil {
+			r.modelProfiles = make(map[string]*ModelProfile)
+			return
+		}
 		r.modelProfiles = profiles
 	}
 }
@@ -448,9 +453,11 @@ func NewSmartRouter(baseRouter *Router, opts ...SmartRouterOption) *SmartRouter 
 
 // initDefaultProfiles 初始化默认模型能力档案
 func (r *SmartRouter) initDefaultProfiles() {
-	// 加载所有默认档案
+	// 加载默认档案，但保留调用方显式注册的同名自定义档案。
 	for modelID, profile := range GetDefaultProfiles() {
-		r.modelProfiles[modelID] = profile
+		if _, exists := r.modelProfiles[modelID]; !exists {
+			r.modelProfiles[modelID] = profile
+		}
 	}
 }
 
@@ -579,11 +586,16 @@ func (r *SmartRouter) CompleteWithRouting(ctx context.Context, req llm.Completio
 
 // StreamWithRouting 带路由的流式补全请求
 func (r *SmartRouter) StreamWithRouting(ctx context.Context, req llm.CompletionRequest, routingCtx *RoutingContext) (*streamx.Stream, *RoutingDecision, error) {
-	// 确保要求流式能力
-	if routingCtx != nil {
-		routingCtx.Constraints.RequireStreaming = true
-		routingCtx.RequiredCapabilities = append(routingCtx.RequiredCapabilities, llm.FeatureStreaming)
+	if routingCtx == nil {
+		routingCtx = r.autoClassifyRequest(ctx, req)
 	}
+	if routingCtx == nil {
+		routingCtx = &RoutingContext{}
+	}
+	// 不修改调用方结构体；复用同一 routingCtx 时也不应累积 capability 或产生竞态。
+	routingCtx = cloneRoutingContext(routingCtx)
+	routingCtx.Constraints.RequireStreaming = true
+	routingCtx.RequiredCapabilities = appendUnique(routingCtx.RequiredCapabilities, llm.FeatureStreaming)
 
 	// 执行路由决策
 	decision, err := r.Route(ctx, req, routingCtx)
@@ -748,6 +760,16 @@ func (r *SmartRouter) meetsHardConstraints(c candidate, ctx *RoutingContext, req
 	}
 	if ctx.Constraints.MaxCostPerRequest > 0 && r.estimateCost(c, req) > ctx.Constraints.MaxCostPerRequest {
 		return false
+	}
+	if ctx.Constraints.MaxInputTokens > 0 || c.modelInfo.MaxTokens > 0 {
+		if estimate, err := tokenizer.EstimateCompletionRequest(req); err == nil {
+			if ctx.Constraints.MaxInputTokens > 0 && estimate.Tokens > ctx.Constraints.MaxInputTokens {
+				return false
+			}
+			if c.modelInfo.MaxTokens > 0 && estimate.Tokens > c.modelInfo.MaxTokens {
+				return false
+			}
+		}
 	}
 	if ctx.Constraints.MaxLatencyMs > 0 {
 		if latency, known := r.knownLatency(c); known && latency > ctx.Constraints.MaxLatencyMs {
@@ -977,10 +999,16 @@ func (r *SmartRouter) calculateTotalScore(score candidateScore, ctx *RoutingCont
 
 // estimateCost 估算请求成本
 func (r *SmartRouter) estimateCost(c candidate, req llm.CompletionRequest) float64 {
-	// 估算输入 Token 数
+	// 使用请求估算器覆盖 messages、tools、tool_choice 与响应格式，
+	// 避免只看正文长度导致成本约束被绕过。
 	inputTokens := 0
-	for _, msg := range req.Messages {
-		inputTokens += len(msg.Content) / 4 // 粗略估算
+	if estimate, err := tokenizer.EstimateCompletionRequest(req); err == nil {
+		inputTokens = estimate.Tokens
+	}
+	if inputTokens == 0 {
+		for _, msg := range req.Messages {
+			inputTokens += len(msg.Content) / 4
+		}
 	}
 
 	// 估算输出 Token 数（使用 MaxTokens 或默认值）
@@ -1046,6 +1074,34 @@ func (r *SmartRouter) autoClassifyRequest(ctx context.Context, req llm.Completio
 	return NewRoutingContext(taskType, complexity)
 }
 
+func cloneRoutingContext(source *RoutingContext) *RoutingContext {
+	if source == nil {
+		return nil
+	}
+	cloned := *source
+	cloned.RequiredCapabilities = append([]string(nil), source.RequiredCapabilities...)
+	cloned.Constraints.PreferredProviders = append([]string(nil), source.Constraints.PreferredProviders...)
+	cloned.Constraints.ExcludedProviders = append([]string(nil), source.Constraints.ExcludedProviders...)
+	cloned.Constraints.PreferredModels = append([]string(nil), source.Constraints.PreferredModels...)
+	cloned.Constraints.ExcludedModels = append([]string(nil), source.Constraints.ExcludedModels...)
+	if source.Hints != nil {
+		cloned.Hints = make(map[string]any, len(source.Hints))
+		for key, value := range source.Hints {
+			cloned.Hints[key] = value
+		}
+	}
+	return &cloned
+}
+
+func appendUnique(values []string, value string) []string {
+	for _, existing := range values {
+		if existing == value {
+			return values
+		}
+	}
+	return append(values, value)
+}
+
 // recordRouting 记录路由历史
 func (r *SmartRouter) recordRouting(decision *RoutingDecision, ctx *RoutingContext, success bool, elapsed time.Duration, resp *llm.CompletionResponse) {
 	r.historyMu.Lock()
@@ -1058,6 +1114,10 @@ func (r *SmartRouter) recordRouting(decision *RoutingDecision, ctx *RoutingConte
 		if profile != nil {
 			actualCost = float64(resp.Usage.PromptTokens)*profile.InputCostPerMillion/1000000 +
 				float64(resp.Usage.CompletionTokens)*profile.OutputCostPerMillion/1000000
+		} else {
+			// 自定义模型没有 profile 时使用 ModelInfo 的公开定价，避免成本恒为 0。
+			actualCost = float64(resp.Usage.PromptTokens)*decision.ModelInfo.InputCost/1000000 +
+				float64(resp.Usage.CompletionTokens)*decision.ModelInfo.OutputCost/1000000
 		}
 	}
 

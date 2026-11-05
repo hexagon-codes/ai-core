@@ -147,7 +147,7 @@ func (r *Router) Unregister(name string) {
 	delete(r.weights, name)
 
 	// 从列表中移除
-	newList := make([]string, 0, len(r.providerList)-1)
+	newList := make([]string, 0, len(r.providerList))
 	for _, n := range r.providerList {
 		if n != name {
 			newList = append(newList, n)
@@ -185,6 +185,9 @@ func (r *Router) Complete(ctx context.Context, req llm.CompletionRequest) (*llm.
 		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
+			if r.getProviderName(fallbackProvider) == r.getProviderName(provider) {
+				return resp, err
+			}
 			fbStart := time.Now()
 			fbResp, fbErr := fallbackProvider.Complete(ctx, req)
 			r.recordLatency(r.getProviderName(fallbackProvider), time.Since(fbStart))
@@ -210,6 +213,9 @@ func (r *Router) Stream(ctx context.Context, req llm.CompletionRequest) (*stream
 		}
 		// 尝试降级
 		if fallbackProvider := r.getFallbackProvider(); fallbackProvider != nil {
+			if r.getProviderName(fallbackProvider) == r.getProviderName(provider) {
+				return stream, err
+			}
 			return fallbackProvider.Stream(ctx, req)
 		}
 		return stream, err
@@ -303,6 +309,17 @@ func (r *Router) selectProvider(req llm.CompletionRequest) (llm.Provider, error)
 				if !r.healthCheck || r.healthy[provName] {
 					return provider, nil
 				}
+				// 映射的 Provider 不健康时，只允许切换到同样声明该模型的 Provider，
+				// 不能把显式模型请求发给不支持该模型的默认 Provider。
+				for _, name := range r.providerList {
+					if name == provName || (r.healthCheck && !r.healthy[name]) {
+						continue
+					}
+					if providerSupportsModel(r.providers[name], req.Model) {
+						return r.providers[name], nil
+					}
+				}
+				return nil, fmt.Errorf("no healthy provider supports model %q", req.Model)
 			}
 		}
 	}
@@ -329,6 +346,18 @@ func (r *Router) selectProvider(req llm.CompletionRequest) (llm.Provider, error)
 	default:
 		return r.roundRobinSelect(available)
 	}
+}
+
+func providerSupportsModel(provider llm.Provider, model string) bool {
+	if provider == nil {
+		return false
+	}
+	for _, info := range provider.Models() {
+		if info.ID == model {
+			return true
+		}
+	}
+	return false
 }
 
 // getHealthyProviders 获取健康的 Provider 列表

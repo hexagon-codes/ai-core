@@ -91,3 +91,21 @@ func TestCompositeClassifierThresholdControlsLLMFallback(t *testing.T) {
 		t.Fatalf("high-threshold Classify() = %s, want reasoning", taskType)
 	}
 }
+
+func TestRouterUnregisterOnEmptyListDoesNotPanic(t *testing.T) {
+	t.Parallel()
+
+	r := New()
+	r.Unregister("missing")
+	r.Unregister("missing")
+}
+
+func TestLLMClassifierParsesSimpleComplexity(t *testing.T) {
+	t.Parallel()
+
+	classifier := NewLLMClassifier(&fixedClassifierProvider{})
+	taskType, complexity := classifier.parseResponse(`{"task_type":"coding","complexity":"simple"}`)
+	if taskType != TaskTypeCoding || complexity != ComplexitySimple {
+		t.Fatalf("parseResponse() = %s/%s, want coding/simple", taskType, complexity)
+	}
+}

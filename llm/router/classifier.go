@@ -8,8 +8,10 @@ package router
 
 import (
 	"context"
+	"encoding/json"
 	"regexp"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
@@ -79,6 +81,9 @@ func (c *RuleBasedClassifier) Name() string {
 func (c *RuleBasedClassifier) Classify(ctx context.Context, req llm.CompletionRequest) (TaskType, TaskComplexity) {
 	// 提取文本内容
 	text := c.extractText(req)
+	if requestHasImage(req) {
+		return TaskTypeVision, c.estimateComplexity(text)
+	}
 	if text == "" {
 		return c.defaultTaskType, c.defaultComplexity
 	}
@@ -108,17 +113,41 @@ func (c *RuleBasedClassifier) Classify(ctx context.Context, req llm.CompletionRe
 	return matchedRule.TaskType, complexity
 }
 
-// extractText 从请求中提取文本
+// extractText 从请求中提取用户输入文本；system prompt 不参与任务分类，
+// 避免长系统提示词把普通请求误判为复杂编程任务。
 func (c *RuleBasedClassifier) extractText(req llm.CompletionRequest) string {
 	var texts []string
-
 	for _, msg := range req.Messages {
-		if msg.Role == llm.RoleUser || msg.Role == llm.RoleSystem {
-			texts = append(texts, msg.Content)
+		if msg.Role != llm.RoleUser {
+			continue
+		}
+		texts = append(texts, messageText(msg))
+	}
+	return strings.Join(texts, " ")
+}
+
+func requestHasImage(req llm.CompletionRequest) bool {
+	for _, msg := range req.Messages {
+		for _, part := range msg.MultiContent {
+			if part.Type == "image_url" {
+				return true
+			}
 		}
 	}
+	return false
+}
 
-	return strings.Join(texts, " ")
+func messageText(msg llm.Message) string {
+	if len(msg.MultiContent) == 0 {
+		return msg.Content
+	}
+	var parts []string
+	for _, part := range msg.MultiContent {
+		if part.Type == "text" || part.Type == "" {
+			parts = append(parts, part.Text)
+		}
+	}
+	return strings.Join(parts, " ")
 }
 
 // matchRule 检查文本是否匹配规则
@@ -142,8 +171,8 @@ func (c *RuleBasedClassifier) matchRule(text string, rule *ClassificationRule) b
 
 // estimateComplexity 根据文本估算复杂度
 func (c *RuleBasedClassifier) estimateComplexity(text string) TaskComplexity {
-	// 基于文本长度的粗略估算
-	length := len(text)
+	// 基于字符数的粗略估算，避免中文字符按 UTF-8 字节数被高估。
+	length := utf8.RuneCountInString(text)
 
 	// 基于词汇复杂度的调整
 	complexWords := c.countComplexIndicators(text)
@@ -161,19 +190,42 @@ func (c *RuleBasedClassifier) estimateComplexity(text string) TaskComplexity {
 	return ComplexitySimple
 }
 
-// estimateComplexityWithHints 根据规则提示估算复杂度
+// estimateComplexityWithHints 根据规则提示估算复杂度；命中多个提示时取最高复杂度，
+// 避免 map 遍历顺序导致同一文本得到不同结果。
 func (c *RuleBasedClassifier) estimateComplexityWithHints(text string, rule *ClassificationRule) TaskComplexity {
 	lowerText := strings.ToLower(text)
-
-	// 检查复杂度提示
+	best := TaskComplexity("")
+	bestRank := -1
 	for hint, complexity := range rule.ComplexityHints {
-		if strings.Contains(lowerText, strings.ToLower(hint)) {
-			return complexity
+		if !strings.Contains(lowerText, strings.ToLower(hint)) {
+			continue
 		}
+		rank := complexityRank(complexity)
+		if rank > bestRank {
+			best, bestRank = complexity, rank
+		}
+	}
+	if best != "" {
+		return best
 	}
 
 	// 使用通用估算
 	return c.estimateComplexity(text)
+}
+
+func complexityRank(complexity TaskComplexity) int {
+	switch complexity {
+	case ComplexityExpert:
+		return 3
+	case ComplexityComplex:
+		return 2
+	case ComplexityMedium:
+		return 1
+	case ComplexitySimple:
+		return 0
+	default:
+		return -1
+	}
 }
 
 // countComplexIndicators 计算复杂度指标词数量
@@ -543,12 +595,11 @@ func (c *LLMClassifier) Name() string {
 
 // Classify 使用 LLM 分类任务
 func (c *LLMClassifier) Classify(ctx context.Context, req llm.CompletionRequest) (TaskType, TaskComplexity) {
-	// 提取用户消息
+	// 提取最后一条用户消息；多轮对话按当前请求而不是历史首条分类。
 	userText := ""
 	for _, msg := range req.Messages {
 		if msg.Role == llm.RoleUser {
-			userText = msg.Content
-			break
+			userText = messageText(msg)
 		}
 	}
 
@@ -579,46 +630,103 @@ func (c *LLMClassifier) Classify(ctx context.Context, req llm.CompletionRequest)
 
 // parseResponse 解析 LLM 响应
 func (c *LLMClassifier) parseResponse(content string) (TaskType, TaskComplexity) {
-	// 简单的字符串匹配（生产环境应使用 JSON 解析）
-	content = strings.ToLower(content)
+	var parsed struct {
+		TaskType   string `json:"task_type"`
+		Complexity string `json:"complexity"`
+	}
+	if err := json.Unmarshal([]byte(strings.TrimSpace(content)), &parsed); err == nil {
+		taskType := normalizeTaskType(parsed.TaskType)
+		complexity := normalizeTaskComplexity(parsed.Complexity)
+		if taskType != "" && complexity != "" {
+			return taskType, complexity
+		}
+	}
 
-	// 解析任务类型
+	// 兼容模型在 JSON 外包了说明文字的情况：只匹配带键名的精确值，
+	// 避免 "complexity" 字段名里的 "complex" 被误判为复杂度。
+	lower := strings.ToLower(content)
 	taskType := TaskTypeChat
-	taskTypes := map[string]TaskType{
-		"chat":          TaskTypeChat,
-		"reasoning":     TaskTypeReasoning,
-		"coding":        TaskTypeCoding,
-		"analysis":      TaskTypeAnalysis,
-		"summarization": TaskTypeSummarization,
-		"extraction":    TaskTypeExtraction,
-		"creative":      TaskTypeCreative,
-		"translation":   TaskTypeTranslation,
-		"math":          TaskTypeMath,
-		"vision":        TaskTypeVision,
-	}
-	for key, tt := range taskTypes {
-		if strings.Contains(content, key) {
-			taskType = tt
+	for _, candidate := range []struct {
+		key   string
+		value TaskType
+	}{
+		{"chat", TaskTypeChat},
+		{"reasoning", TaskTypeReasoning},
+		{"coding", TaskTypeCoding},
+		{"analysis", TaskTypeAnalysis},
+		{"summarization", TaskTypeSummarization},
+		{"extraction", TaskTypeExtraction},
+		{"creative", TaskTypeCreative},
+		{"translation", TaskTypeTranslation},
+		{"math", TaskTypeMath},
+		{"vision", TaskTypeVision},
+	} {
+		if strings.Contains(lower, `"task_type":"`+candidate.key+`"`) ||
+			strings.Contains(lower, `"task_type": "`+candidate.key+`"`) {
+			taskType = candidate.value
 			break
 		}
 	}
 
-	// 解析复杂度
 	complexity := ComplexityMedium
-	complexities := map[string]TaskComplexity{
-		"simple":  ComplexitySimple,
-		"medium":  ComplexityMedium,
-		"complex": ComplexityComplex,
-		"expert":  ComplexityExpert,
-	}
-	for key, comp := range complexities {
-		if strings.Contains(content, key) {
-			complexity = comp
+	for _, candidate := range []struct {
+		key   string
+		value TaskComplexity
+	}{
+		{"simple", ComplexitySimple},
+		{"medium", ComplexityMedium},
+		{"complex", ComplexityComplex},
+		{"expert", ComplexityExpert},
+	} {
+		if strings.Contains(lower, `"complexity":"`+candidate.key+`"`) ||
+			strings.Contains(lower, `"complexity": "`+candidate.key+`"`) {
+			complexity = candidate.value
 			break
 		}
 	}
-
 	return taskType, complexity
+}
+
+func normalizeTaskType(value string) TaskType {
+	switch TaskType(strings.ToLower(strings.TrimSpace(value))) {
+	case TaskTypeChat:
+		return TaskTypeChat
+	case TaskTypeReasoning:
+		return TaskTypeReasoning
+	case TaskTypeCoding:
+		return TaskTypeCoding
+	case TaskTypeAnalysis:
+		return TaskTypeAnalysis
+	case TaskTypeSummarization:
+		return TaskTypeSummarization
+	case TaskTypeExtraction:
+		return TaskTypeExtraction
+	case TaskTypeCreative:
+		return TaskTypeCreative
+	case TaskTypeTranslation:
+		return TaskTypeTranslation
+	case TaskTypeMath:
+		return TaskTypeMath
+	case TaskTypeVision:
+		return TaskTypeVision
+	default:
+		return ""
+	}
+}
+
+func normalizeTaskComplexity(value string) TaskComplexity {
+	switch TaskComplexity(strings.ToLower(strings.TrimSpace(value))) {
+	case ComplexitySimple:
+		return ComplexitySimple
+	case ComplexityMedium:
+		return ComplexityMedium
+	case ComplexityComplex:
+		return ComplexityComplex
+	case ComplexityExpert:
+		return ComplexityExpert
+	default:
+		return ""
+	}
 }
 
 // ============== 组合分类器 ==============
