@@ -65,14 +65,16 @@ func (s TaskState) Terminal() bool {
 //     已被拦截（失败终态）。
 //   - 未知非空状态按进行中处理（继续轮询），空状态按排队处理。
 func NormalizeTaskState(status string) TaskState {
-	switch strings.ToLower(strings.TrimSpace(status)) {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	normalized = strings.NewReplacer(" ", "_", "-", "_").Replace(normalized)
+	switch normalized {
 	case "queued", "queueing", "submitted", "pending", "created":
 		return TaskQueued
 	case "running", "processing", "generating", "in_progress", "request_moderated":
 		return TaskRunning
 	case "succeeded", "success", "succeed", "completed", "done", "ready":
 		return TaskSucceeded
-	case "failed", "fail", "error", "content_moderated":
+	case "failed", "fail", "error", "content_moderated", "task_not_found", "not_found":
 		return TaskFailed
 	case "cancelled", "canceled":
 		return TaskCancelled

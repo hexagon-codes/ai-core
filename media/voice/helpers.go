@@ -1,6 +1,7 @@
 package voice
 
 import (
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -39,6 +40,20 @@ func readVoiceBody(body io.Reader, limit int64, provider string) ([]byte, error)
 		return nil, fmt.Errorf("%s: response exceeds %d bytes", provider, limit)
 	}
 	return data, nil
+}
+
+const maxVoiceJSONResponseBytes = 32 << 20
+
+// decodeVoiceJSON 读取带大小上限的 JSON 响应，避免异常上游放大内存。
+func decodeVoiceJSON(body io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(body, maxVoiceJSONResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxVoiceJSONResponseBytes {
+		return fmt.Errorf("voice response exceeds %d bytes", maxVoiceJSONResponseBytes)
+	}
+	return json.Unmarshal(data, target)
 }
 
 func requestIDFromHeader(header http.Header) string {

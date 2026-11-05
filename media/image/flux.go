@@ -188,7 +188,7 @@ func (p *fluxProvider) Submit(ctx context.Context, req Request) (string, error) 
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeImageJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("bfl-flux: decode submit response: %w", err)
 	}
 	id := firstJSONPath(parsed, "id", "request_id", "data.id")
@@ -222,7 +222,7 @@ func (p *fluxProvider) Poll(ctx context.Context, taskID string) (TaskStatus, err
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeImageJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("bfl-flux: decode poll response: %w", err)
 	}
 	rawStatus := firstJSONPath(parsed, "status", "state")

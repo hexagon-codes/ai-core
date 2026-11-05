@@ -167,7 +167,7 @@ func (p *veoProvider) Submit(ctx context.Context, req Request) (string, error) {
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("google-veo: decode submit response: %w", err)
 	}
 	name := firstJSONPath(parsed, "name")
@@ -206,7 +206,7 @@ func (p *veoProvider) Poll(ctx context.Context, taskID string) (TaskStatus, erro
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("google-veo: decode poll response: %w", err)
 	}
 	done := firstJSONBool(parsed, "done")

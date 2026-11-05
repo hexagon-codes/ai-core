@@ -50,7 +50,7 @@ func SubmitAndWaitAudio(ctx context.Context, p AudioProvider, req AudioRequest, 
 		return AudioTaskStatus{}, err
 	}
 
-	var last AudioTaskStatus
+	last := AudioTaskStatus{TaskID: taskID}
 	waitErr := media.WaitFor(ctx, interval, func(ctx context.Context) (bool, error) {
 		st, perr := p.Poll(ctx, taskID)
 		if perr != nil {

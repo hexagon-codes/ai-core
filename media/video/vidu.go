@@ -182,7 +182,7 @@ func (p *viduProvider) Submit(ctx context.Context, req Request) (string, error) 
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("vidu: decode submit response: %w", err)
 	}
 	taskID := firstJSONPath(parsed, "task_id", "id", "data.task_id", "data.id")
@@ -211,7 +211,7 @@ func (p *viduProvider) Poll(ctx context.Context, taskID string) (TaskStatus, err
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("vidu: decode poll response: %w", err)
 	}
 	rawStatus := firstJSONPath(parsed, "status", "state", "data.status", "creations.0.status", "data.creations.0.status")

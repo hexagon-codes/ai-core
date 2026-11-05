@@ -247,7 +247,7 @@ func (p *seedanceProvider) Submit(ctx context.Context, req Request) (string, err
 	defer resp.Body.Close()
 
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("%s: decode submit response: %w", p.name, err)
 	}
 	taskID := firstJSONPath(parsed, "id", "task_id", "data.id", "data.task_id")
@@ -389,6 +389,12 @@ func anyToString(value any) string {
 		return v
 	case json.Number:
 		return v.String()
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
 	case fmt.Stringer:
 		return v.String()
 	default:

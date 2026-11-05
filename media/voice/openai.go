@@ -106,6 +106,7 @@ func NewOpenAISTT(apiKey, model string, opts ...STTOption) *OpenAISTT {
 	for _, opt := range opts {
 		opt(s)
 	}
+	s.baseURL = strings.TrimRight(s.baseURL, "/")
 	s.tx = transport.NewTransport(s.client, s.policy)
 	return s
 }
@@ -200,7 +201,7 @@ func (s *OpenAISTT) Transcribe(ctx context.Context, audio []byte, opts Transcrib
 
 	// 解析响应
 	var result whisperResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeVoiceJSON(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("解析 STT 响应失败: %w", err)
 	}
 
@@ -283,6 +284,7 @@ func NewOpenAITTS(apiKey, model string, opts ...TTSOption) *OpenAITTS {
 	for _, opt := range opts {
 		opt(t)
 	}
+	t.baseURL = strings.TrimRight(t.baseURL, "/")
 	t.tx = transport.NewTransport(t.client, t.policy)
 	return t
 }

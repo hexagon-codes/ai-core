@@ -3,9 +3,24 @@ package image
 import (
 	"encoding/json"
 	"fmt"
+	"io"
 	"strconv"
 	"strings"
 )
+
+const maxImageJSONResponseBytes = 64 << 20
+
+// decodeImageJSON 读取带大小上限的 JSON 响应，避免异常上游放大内存。
+func decodeImageJSON(body io.Reader, target any) error {
+	data, err := io.ReadAll(io.LimitReader(body, maxImageJSONResponseBytes+1))
+	if err != nil {
+		return err
+	}
+	if len(data) > maxImageJSONResponseBytes {
+		return fmt.Errorf("image response exceeds %d bytes", maxImageJSONResponseBytes)
+	}
+	return json.Unmarshal(data, target)
+}
 
 func firstJSONPath(root map[string]any, paths ...string) string {
 	for _, path := range paths {
@@ -44,6 +59,12 @@ func anyToString(value any) string {
 		return v
 	case json.Number:
 		return v.String()
+	case float64:
+		return strconv.FormatFloat(v, 'f', -1, 64)
+	case int:
+		return strconv.Itoa(v)
+	case int64:
+		return strconv.FormatInt(v, 10)
 	case fmt.Stringer:
 		return v.String()
 	default:

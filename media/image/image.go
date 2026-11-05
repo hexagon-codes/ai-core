@@ -14,6 +14,7 @@ package image
 import (
 	"context"
 	"fmt"
+	"sort"
 )
 
 // Provider 文生图 Provider 接口。
@@ -100,10 +101,17 @@ func NewService(providers map[string]Provider, defaultName string) *Service {
 			continue
 		}
 		s.providers[k] = p
-		for _, m := range p.SupportedModels() {
-			// 后注册的 Provider 不覆盖前面已索引的模型，保留首选
-			if _, exists := s.modelIndex[m]; !exists {
-				s.modelIndex[m] = p
+	}
+	names := make([]string, 0, len(s.providers))
+	for name := range s.providers {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+	for _, name := range names {
+		for _, model := range s.providers[name].SupportedModels() {
+			// 同名模型按 Provider 名字典序确定，避免 map 遍历导致路由漂移。
+			if _, exists := s.modelIndex[model]; !exists {
+				s.modelIndex[model] = s.providers[name]
 			}
 		}
 	}

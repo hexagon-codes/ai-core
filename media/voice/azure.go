@@ -2,8 +2,8 @@ package voice
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
+	"math"
 	"net/http"
 	"strings"
 	"time"
@@ -131,8 +131,12 @@ func (s *AzureSTT) Transcribe(ctx context.Context, audio []byte, opts Transcribe
 	defer resp.Body.Close()
 
 	var result azureSTTResponse
-	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
+	if err := decodeVoiceJSON(resp.Body, &result); err != nil {
 		return nil, fmt.Errorf("解析响应失败: %w", err)
+	}
+
+	if result.RecognitionStatus != "" && result.RecognitionStatus != "Success" {
+		return nil, fmt.Errorf("azure stt: recognition status %s", result.RecognitionStatus)
 	}
 
 	confidence := 0.0
@@ -249,11 +253,25 @@ func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeO
 	if format == "" {
 		format = FormatMP3
 	}
+	switch format {
+	case FormatMP3, FormatWAV, FormatOGG:
+	default:
+		return nil, &definitiveSynthesisError{cause: fmt.Errorf("azure-tts: unsupported format %s", format)}
+	}
 
+	lang := edgeVoiceLang(voice)
+	rate := ""
+	if opts.Speed > 0 && opts.Speed != 1 {
+		rate = fmt.Sprintf("<prosody rate='%+d%%'>", int(math.Round((opts.Speed-1.0)*100)))
+	}
+	closeRate := ""
+	if rate != "" {
+		closeRate = "</prosody>"
+	}
 	// 构建 SSML（转义用户文本防止 SSML 注入）
-	ssml := fmt.Sprintf(`<speak version='1.0' xml:lang='zh-CN'>
-		<voice name='%s'>%s</voice>
-	</speak>`, escapeXML(voice), escapeXML(text))
+	ssml := fmt.Sprintf(`<speak version='1.0' xml:lang='%s'>
+		<voice name='%s'>%s%s%s</voice>
+	</speak>`, escapeXML(lang), escapeXML(voice), rate, escapeXML(text), closeRate)
 
 	// 端点优先用注入的 baseURL（私有部署 / mock），否则按 region 拼官方域名。
 	base := t.baseURL

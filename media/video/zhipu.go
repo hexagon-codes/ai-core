@@ -172,7 +172,7 @@ func (z *zhipuCogVideoX) Submit(ctx context.Context, req Request) (string, error
 	defer resp.Body.Close()
 
 	var parsed zhipuSubmitResp
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("decode submit response: %w", err)
 	}
 	if parsed.Error != nil {
@@ -206,7 +206,7 @@ func (z *zhipuCogVideoX) Poll(ctx context.Context, taskID string) (TaskStatus, e
 	defer resp.Body.Close()
 
 	var parsed zhipuPollResp
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("decode poll response: %w", err)
 	}
 
@@ -214,7 +214,9 @@ func (z *zhipuCogVideoX) Poll(ctx context.Context, taskID string) (TaskStatus, e
 		Provider: z.Name(),
 		Model:    parsed.Model,
 		Status:   strings.ToLower(parsed.TaskStatus),
+		State:    media.NormalizeTaskState(parsed.TaskStatus),
 	}
+	st.Done = st.State.Terminal()
 	switch strings.ToUpper(parsed.TaskStatus) {
 	case "SUCCESS":
 		st.Done = true

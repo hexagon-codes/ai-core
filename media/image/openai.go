@@ -186,8 +186,11 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 	if body.Size == "" {
 		body.Size = "1024x1024"
 	}
-	// 默认请求 base64 直接内嵌，避免依赖外部 URL 寿命；前端按需自行选择展示
-	body.ResponseFormat = "b64_json"
+	// 默认请求 base64 直接内嵌，避免依赖外部 URL 寿命；调用方显式指定时尊重其选择。
+	body.ResponseFormat = req.ResponseFormat
+	if body.ResponseFormat == "" {
+		body.ResponseFormat = "b64_json"
+	}
 	// GPT Image 原生返回base64，不接受旧图片接口的response_format和style字段。
 	if strings.HasPrefix(model, "gpt-image-") || model == "chatgpt-image-latest" {
 		body.ResponseFormat = ""
@@ -225,7 +228,7 @@ func (p *openAICompatProvider) Generate(ctx context.Context, req Request) (*Resu
 	defer resp.Body.Close()
 
 	var parsed openAIImagesResponse
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeImageJSON(resp.Body, &parsed); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if parsed.Error != nil {

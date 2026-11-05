@@ -31,13 +31,14 @@ type Provider interface {
 
 // Request 语音对话请求。
 type Request struct {
-	Model    string `json:"model"`             // 模型 ID（如 gpt-4o-audio-preview）
-	AudioB64 string `json:"audio,omitempty"`   // 用户语音（base64），与 Text 二选一
-	Text     string `json:"text,omitempty"`    // 文本输入兜底（用户可能想打字+听语音）
-	Voice    string `json:"voice,omitempty"`   // 输出音色（gpt-4o：alloy/echo/fable/...）
-	Format   string `json:"format,omitempty"`  // 输出格式 wav/mp3，默认 wav
-	System   string `json:"system,omitempty"`  // System prompt（可选）
-	History  []Turn `json:"history,omitempty"` // 历史消息（用于多轮）
+	Model       string `json:"model"`                  // 模型 ID（如 gpt-4o-audio-preview）
+	AudioB64    string `json:"audio,omitempty"`        // 用户语音（base64），与 Text 二选一
+	Text        string `json:"text,omitempty"`         // 文本输入兜底（用户可能想打字+听语音）
+	Voice       string `json:"voice,omitempty"`        // 输出音色（gpt-4o：alloy/echo/fable/...）
+	Format      string `json:"format,omitempty"`       // 输出格式 wav/mp3，默认 wav
+	InputFormat string `json:"input_format,omitempty"` // 输入音频格式；空则沿用 Format 以保持兼容
+	System      string `json:"system,omitempty"`       // System prompt（可选）
+	History     []Turn `json:"history,omitempty"`      // 历史消息（用于多轮）
 }
 
 // Turn 历史轮次。

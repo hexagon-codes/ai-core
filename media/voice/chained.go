@@ -114,14 +114,29 @@ func BuildMultiTTS(configs []MultiTTSConfig) *ChainedTTS {
 				providers = append(providers, NewMiniMaxTTS(c.APIKey, c.GroupID, opts...))
 			}
 		case "edge-tts", "edge":
-			providers = append(providers, NewEdgeTTS())
+			opts := []EdgeTTSOption{}
+			if c.Voice != "" {
+				opts = append(opts, EdgeTTSWithVoice(c.Voice))
+			}
+			providers = append(providers, NewEdgeTTS(opts...))
 		case "openai-tts", "openai":
 			if c.APIKey != "" {
-				providers = append(providers, NewOpenAITTS(c.APIKey, "tts-1"))
+				opts := []TTSOption{}
+				if c.BaseURL != "" {
+					opts = append(opts, TTSWithBaseURL(c.BaseURL))
+				}
+				providers = append(providers, NewOpenAITTS(c.APIKey, "tts-1", opts...))
 			}
 		case "azure-tts", "azure":
 			if c.APIKey != "" && c.Region != "" {
-				providers = append(providers, NewAzureTTS(c.APIKey, c.Region))
+				opts := []AzureTTSOption{}
+				if c.BaseURL != "" {
+					opts = append(opts, AzureTTSWithBaseURL(c.BaseURL))
+				}
+				if c.Voice != "" {
+					opts = append(opts, AzureTTSWithVoice(c.Voice))
+				}
+				providers = append(providers, NewAzureTTS(c.APIKey, c.Region, opts...))
 			}
 		}
 	}

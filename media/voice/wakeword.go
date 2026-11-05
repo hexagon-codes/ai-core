@@ -49,9 +49,9 @@ func NewWakeWordDetector(words []string, callback WakeCallback, opts ...WakeWord
 // 返回匹配到的唤醒词，未匹配返回空字符串。
 func (d *WakeWordDetector) Detect(text string) string {
 	d.mu.RLock()
-	defer d.mu.RUnlock()
 
 	if !d.enabled || len(d.words) == 0 {
+		d.mu.RUnlock()
 		return ""
 	}
 
@@ -61,17 +61,23 @@ func (d *WakeWordDetector) Detect(text string) string {
 	}
 
 	for _, word := range d.words {
+		if strings.TrimSpace(word) == "" {
+			continue
+		}
 		checkWord := word
 		if !d.sensitive {
 			checkWord = strings.ToLower(word)
 		}
 		if strings.Contains(checkText, checkWord) {
-			if d.callback != nil {
-				d.callback(word, text)
+			callback := d.callback
+			d.mu.RUnlock()
+			if callback != nil {
+				callback(word, text)
 			}
 			return word
 		}
 	}
+	d.mu.RUnlock()
 	return ""
 }
 
@@ -84,6 +90,10 @@ func (d *WakeWordDetector) SetEnabled(enabled bool) {
 
 // AddWord 添加唤醒词
 func (d *WakeWordDetector) AddWord(word string) {
+	word = strings.TrimSpace(word)
+	if word == "" {
+		return
+	}
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	d.words = append(d.words, word)

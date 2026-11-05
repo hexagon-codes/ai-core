@@ -150,11 +150,15 @@ func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string, opts Synthe
 	if err != nil {
 		return nil, &definitiveSynthesisError{cause: fmt.Errorf("elevenlabs: marshal request: %w", err)}
 	}
+	requestURL := t.baseURL + "/text-to-speech/" + urlPathEscape(voice)
+	if opts.Format == FormatPCM {
+		requestURL += "?output_format=pcm_16000"
+	}
 	resp, err := transport.Do(ctx, transport.Request{
 		Provider:  t.Name(),
 		Action:    "tts.synthesize",
 		Method:    http.MethodPost,
-		URL:       t.baseURL + "/text-to-speech/" + urlPathEscape(voice),
+		URL:       requestURL,
 		Body:      payload,
 		Client:    t.client,
 		Transport: t.transport,

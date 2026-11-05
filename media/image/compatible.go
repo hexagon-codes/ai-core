@@ -182,7 +182,7 @@ func (p *compatibleProvider) Submit(ctx context.Context, req Request) (string, e
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeImageJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("%s: decode submit response: %w", p.cfg.Name, err)
 	}
 	taskID := firstJSONPath(parsed, p.cfg.SubmitIDPaths...)
@@ -211,7 +211,7 @@ func (p *compatibleProvider) Poll(ctx context.Context, taskID string) (TaskStatu
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeImageJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("%s: decode poll response: %w", p.cfg.Name, err)
 	}
 	rawStatus := firstJSONPath(parsed, p.cfg.StatusPaths...)

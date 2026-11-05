@@ -191,7 +191,7 @@ func (p *klingProvider) Submit(ctx context.Context, req Request) (string, error)
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return "", fmt.Errorf("kling: decode submit response: %w", err)
 	}
 	taskID := firstJSONPath(parsed, "data.task_id", "task_id", "id")
@@ -225,7 +225,7 @@ func (p *klingProvider) Poll(ctx context.Context, taskID string) (TaskStatus, er
 	}
 	defer resp.Body.Close()
 	var parsed map[string]any
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVideoJSON(resp.Body, &parsed); err != nil {
 		return TaskStatus{}, fmt.Errorf("kling: decode poll response: %w", err)
 	}
 	rawStatus := firstJSONPath(parsed, "data.task_status", "data.status", "task_status", "status")

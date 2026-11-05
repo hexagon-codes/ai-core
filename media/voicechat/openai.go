@@ -162,6 +162,10 @@ func (p *openAIVoiceChat) Chat(ctx context.Context, req Request) (*Result, error
 	if format == "" {
 		format = "wav"
 	}
+	inputFormat := req.InputFormat
+	if inputFormat == "" {
+		inputFormat = format
+	}
 
 	messages := []oaMessage{}
 	if req.System != "" {
@@ -182,7 +186,7 @@ func (p *openAIVoiceChat) Chat(ctx context.Context, req Request) (*Result, error
 	if req.AudioB64 != "" {
 		userParts = append(userParts, oaPart{
 			Type:       "input_audio",
-			InputAudio: &oaInputAudio{Data: req.AudioB64, Format: format},
+			InputAudio: &oaInputAudio{Data: req.AudioB64, Format: inputFormat},
 		})
 	}
 	messages = append(messages, oaMessage{Role: "user", Content: userParts})
@@ -218,7 +222,7 @@ func (p *openAIVoiceChat) Chat(ctx context.Context, req Request) (*Result, error
 	defer resp.Body.Close()
 
 	var parsed oaChatResp
-	if err := json.NewDecoder(resp.Body).Decode(&parsed); err != nil {
+	if err := decodeVoicechatJSON(resp.Body, &parsed); err != nil {
 		return nil, fmt.Errorf("decode response: %w", err)
 	}
 	if parsed.Error != nil {

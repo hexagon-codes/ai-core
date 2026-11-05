@@ -46,7 +46,7 @@ func SubmitAndWait(ctx context.Context, p AsyncImageProvider, req Request, inter
 		return TaskStatus{}, err
 	}
 
-	var last TaskStatus
+	last := TaskStatus{TaskID: taskID}
 	waitErr := media.WaitFor(ctx, interval, func(ctx context.Context) (bool, error) {
 		st, perr := p.Poll(ctx, taskID)
 		if perr != nil {
