@@ -375,31 +375,97 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 		Type:       "object",
 		Properties: make(map[string]*Schema),
 	}
+	required := make(map[string]bool)
+	addRequired := func(name string) {
+		if name == "" || required[name] {
+			return
+		}
+		required[name] = true
+		schema.Required = append(schema.Required, name)
+	}
+	removeRequired := func(name string) {
+		if !required[name] {
+			return
+		}
+		delete(required, name)
+		for i, existing := range schema.Required {
+			if existing == name {
+				schema.Required = append(schema.Required[:i], schema.Required[i+1:]...)
+				return
+			}
+		}
+	}
+	embeddedProperties := make(map[string]bool)
+	conflictingProperties := make(map[string]bool)
 
 	for i := 0; i < t.NumField(); i++ {
 		field := t.Field(i)
-		if !field.IsExported() {
+		jsonTag := field.Tag.Get("json")
+		if jsonTag == "-" {
+			continue
+		}
+		jsonName := jsonTag
+		if idx := strings.Index(jsonName, ","); idx != -1 {
+			jsonName = jsonName[:idx]
+		}
+
+		// encoding/json 会把匿名嵌入结构体的导出字段提升到外层。Schema 必须
+		// 保持同样形状，否则 LLM 会按嵌套属性生成参数，而 Go 侧按扁平字段解析。
+		if field.Anonymous && jsonName == "" {
+			embeddedType := field.Type
+			for embeddedType.Kind() == reflect.Pointer {
+				embeddedType = embeddedType.Elem()
+			}
+			if embeddedType.Kind() == reflect.Struct {
+				embedded := g.build(field.Type)
+				for name, property := range embedded.Properties {
+					if _, exists := schema.Properties[name]; exists {
+						if embeddedProperties[name] && !conflictingProperties[name] {
+							// encoding/json 对同深度同名字段视为歧义并省略；
+							// Schema 不应继续声明一个实际 JSON 中不存在的字段。
+							delete(schema.Properties, name)
+							conflictingProperties[name] = true
+							removeRequired(name)
+						}
+						continue
+					}
+					if conflictingProperties[name] {
+						continue
+					}
+					schema.Properties[name] = property
+					embeddedProperties[name] = true
+				}
+				for _, name := range embedded.Required {
+					if conflictingProperties[name] || !embeddedProperties[name] {
+						continue
+					}
+					addRequired(name)
+				}
+				continue
+			}
+		}
+
+		// 未导出匿名结构体带显式 json 名称时，encoding/json 仍会把它作为
+		// 具名属性输出；不能仅因字段本身未导出就跳过。
+		anonymousNamedStruct := false
+		if field.Anonymous && jsonName != "" {
+			namedType := field.Type
+			for namedType.Kind() == reflect.Pointer {
+				namedType = namedType.Elem()
+			}
+			anonymousNamedStruct = namedType.Kind() == reflect.Struct
+		}
+		if !field.IsExported() && !anonymousNamedStruct {
 			continue
 		}
 
-		// 获取 JSON tag 或使用字段名
 		name := field.Name
-		jsonTag := field.Tag.Get("json")
 		stringEncoded := false
 		for _, option := range strings.Split(jsonTag, ",")[1:] {
 			stringEncoded = stringEncoded || option == "string"
 		}
-		if jsonTag == "-" {
-			continue
-		}
-		if jsonTag != "" {
-			// 解析 json tag（处理 omitempty 等）
-			if idx := strings.Index(jsonTag, ","); idx != -1 {
-				jsonTag = jsonTag[:idx]
-			}
-			if jsonTag != "" {
-				name = jsonTag
-			}
+		if jsonName != "" {
+			name = jsonName
 		}
 
 		propSchema := g.build(field.Type)
@@ -445,7 +511,7 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 
 		// 解析 required tag
 		if field.Tag.Get("required") == "true" {
-			schema.Required = append(schema.Required, name)
+			addRequired(name)
 		}
 
 		// 解析 enum tag
@@ -518,7 +584,12 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			propSchema.AdditionalKeywords[numericStringKeyword] = true
 		}
 
+		if embeddedProperties[name] {
+			removeRequired(name)
+		}
 		schema.Properties[name] = propSchema
+		delete(embeddedProperties, name)
+		delete(conflictingProperties, name)
 	}
 
 	return schema

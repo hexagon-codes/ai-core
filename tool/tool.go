@@ -67,6 +67,10 @@ type FuncTool[I, O any] struct {
 	description string
 	fn          func(context.Context, I) (O, error)
 	schema      *schema.Schema
+
+	validatorOnce sync.Once
+	validator     *schema.Validator
+	validatorErr  error
 }
 
 // NewFunc 从函数创建工具
@@ -133,13 +137,17 @@ func (t *FuncTool[I, O]) Execute(ctx context.Context, args map[string]any) (Resu
 
 // Validate 验证参数
 func (t *FuncTool[I, O]) Validate(args map[string]any) error {
-	// 检查必填字段
-	if t.schema != nil && len(t.schema.Required) > 0 {
-		for _, field := range t.schema.Required {
-			if _, ok := args[field]; !ok {
-				return fmt.Errorf("missing required field: %s", field)
-			}
-		}
+	if t.schema == nil {
+		return nil
+	}
+	t.validatorOnce.Do(func() {
+		t.validator, t.validatorErr = schema.NewValidator(t.schema)
+	})
+	if t.validatorErr != nil {
+		return fmt.Errorf("invalid tool schema: %w", t.validatorErr)
+	}
+	if err := t.validator.Validate(args); err != nil {
+		return err
 	}
 	return nil
 }
@@ -162,6 +170,10 @@ type SimpleTool struct {
 	schema      *schema.Schema
 	executeFn   func(context.Context, map[string]any) (any, error)
 	validateFn  func(map[string]any) error
+
+	validatorOnce sync.Once
+	validator     *schema.Validator
+	validatorErr  error
 }
 
 // SimpleToolOption 是 SimpleTool 的配置选项
@@ -227,9 +239,20 @@ func (t *SimpleTool) Execute(ctx context.Context, args map[string]any) (Result, 
 // Validate 验证参数
 func (t *SimpleTool) Validate(args map[string]any) error {
 	if t.validateFn != nil {
-		return t.validateFn(args)
+		if err := t.validateFn(args); err != nil {
+			return err
+		}
 	}
-	return nil
+	if t.schema == nil {
+		return nil
+	}
+	t.validatorOnce.Do(func() {
+		t.validator, t.validatorErr = schema.NewValidator(t.schema)
+	})
+	if t.validatorErr != nil {
+		return fmt.Errorf("invalid tool schema: %w", t.validatorErr)
+	}
+	return t.validator.Validate(args)
 }
 
 // ============== 工具注册中心 ==============
