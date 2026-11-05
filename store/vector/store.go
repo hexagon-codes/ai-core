@@ -20,6 +20,7 @@ package vector
 import (
 	"context"
 	"math"
+	"reflect"
 	"sort"
 	"sync"
 	"time"
@@ -368,9 +369,18 @@ func matchFilter(metadata, filter map[string]any) bool {
 	}
 
 	for k, v := range filter {
-		if mv, ok := metadata[k]; !ok || mv != v {
+		if mv, ok := metadata[k]; !ok || !equalFilterValue(mv, v) {
 			return false
 		}
 	}
 	return true
+}
+
+// equalFilterValue 比较过滤值，避免对 slice/map 等不可比较类型直接使用
+// 接口 != 导致运行时 panic。
+func equalFilterValue(a, b any) bool {
+	if reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	return reflect.DeepEqual(a, b)
 }
