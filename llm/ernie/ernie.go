@@ -319,9 +319,11 @@ type ernieStreamParser struct{}
 
 func (p *ernieStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 	var er struct {
-		Result string `json:"result"`
-		IsEnd  bool   `json:"is_end"`
-		Usage  struct {
+		Result    string `json:"result"`
+		IsEnd     bool   `json:"is_end"`
+		ErrorCode int    `json:"error_code"`
+		ErrorMsg  string `json:"error_msg"`
+		Usage     struct {
 			PromptTokens     int `json:"prompt_tokens"`
 			CompletionTokens int `json:"completion_tokens"`
 			TotalTokens      int `json:"total_tokens"`
@@ -330,12 +332,22 @@ func (p *ernieStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 	if err := json.Unmarshal(data, &er); err != nil {
 		return nil, err
 	}
+	if er.ErrorCode != 0 {
+		return nil, fmt.Errorf("ernie stream error %d: %s", er.ErrorCode, er.ErrorMsg)
+	}
 
 	chunk := &streamx.Chunk{
 		Content: er.Result,
 	}
 	if er.IsEnd {
 		chunk.FinishReason = "stop"
+	}
+	if er.Usage.PromptTokens > 0 || er.Usage.CompletionTokens > 0 || er.Usage.TotalTokens > 0 {
+		chunk.Usage = &streamx.Usage{
+			PromptTokens:     er.Usage.PromptTokens,
+			CompletionTokens: er.Usage.CompletionTokens,
+			TotalTokens:      er.Usage.TotalTokens,
+		}
 	}
 	return chunk, nil
 }

@@ -78,6 +78,9 @@ func TestClassifyError_CtxAndNil(t *testing.T) {
 	if got := ClassifyError(context.DeadlineExceeded, 0, ""); got != FailProviderDown {
 		t.Errorf("ctx deadline = %s, want provider_down", got)
 	}
+	if got := ClassifyError(context.Canceled, 0, ""); got != FailNone {
+		t.Errorf("ctx canceled = %s, want none", got)
+	}
 	if got := ClassifyError(nil, 0, ""); got != FailNone {
 		t.Errorf("nil err = %s, want none", got)
 	}

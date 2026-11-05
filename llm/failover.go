@@ -104,9 +104,12 @@ func ClassifyError(err error, httpStatus int, body string) FailoverReason {
 		return FailProviderDown
 	}
 
-	// 2. ctx 超时/取消 → ProviderDown
+	// 2. ctx 超时/取消分类：用户取消不是 Provider 故障，不能触发重试或切换。
 	if err != nil {
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled) {
+		if errors.Is(err, context.Canceled) {
+			return FailNone
+		}
+		if errors.Is(err, context.DeadlineExceeded) {
 			return FailProviderDown
 		}
 

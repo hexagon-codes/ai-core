@@ -2,11 +2,11 @@
 package ollama
 
 import (
-	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"math"
@@ -852,7 +852,8 @@ type numCtxReservationReadCloser struct {
 
 func (r *numCtxReservationReadCloser) Read(p []byte) (int, error) {
 	n, err := r.ReadCloser.Read(p)
-	if err != nil && (n == 0 || !bytes.ContainsRune(p[:n], '\n') || len(bytes.TrimSpace(p[:n])) == 0) {
+	// EOF 不代表失败：末帧可能是没有换行的 {"done":true}，由解析器提交成功。
+	if err != nil && !errors.Is(err, io.EOF) {
 		r.reservation.finish(false)
 	}
 	return n, err
@@ -1389,6 +1390,11 @@ func (p *ollamaStreamParser) Parse(data []byte) (*streamx.Chunk, error) {
 		chunk.FinishReason = resp.DoneReason
 		if chunk.FinishReason == "" {
 			chunk.FinishReason = "stop"
+		}
+		chunk.Usage = &streamx.Usage{
+			PromptTokens:     resp.PromptEvalCount,
+			CompletionTokens: resp.EvalCount,
+			TotalTokens:      resp.PromptEvalCount + resp.EvalCount,
 		}
 	}
 	for i, tc := range resp.Message.ToolCalls {

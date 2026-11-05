@@ -161,6 +161,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	}
 
 	parsed := p.parseResponse(&result)
+	if result.Error != nil {
+		return nil, fmt.Errorf("openai error: %s", result.Error.Message)
+	}
 	if explicitReasoning {
 		receipt := reasoningPlan.Receipt.WithEvidence(
 			true,
@@ -631,6 +634,11 @@ type openAIResponse struct {
 	ID      string `json:"id"`
 	Model   string `json:"model"`
 	Created int64  `json:"created"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	} `json:"error,omitempty"`
 	Choices []struct {
 		Index   int `json:"index"`
 		Message struct {

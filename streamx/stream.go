@@ -255,6 +255,10 @@ type Stream struct {
 	onTerminal []func()
 	terminal   bool
 	streamErr  error
+
+	// 底层 Reader 由 reader goroutine 或 Close 任一方关闭，必须只关闭一次。
+	sourceCloseOnce sync.Once
+	sourceCloseErr  error
 }
 
 // ChunkParser 定义块解析器接口
@@ -550,7 +554,6 @@ func (s *Stream) Collect() (*Result, error) {
 		case <-s.ctx.Done():
 			s.mu.Lock()
 			terminal := s.terminal
-			result := s.result
 			s.mu.Unlock()
 			if terminal {
 				// Terminal observers may cancel the provider context as cleanup
@@ -558,7 +561,7 @@ func (s *Stream) Collect() (*Result, error) {
 				// streamErr—not the cleanup cancellation race—are authoritative.
 				<-s.done
 				s.mu.Lock()
-				result = s.result
+				result := s.result
 				terminalErr := s.streamErr
 				s.mu.Unlock()
 				return result, terminalErr
@@ -570,13 +573,36 @@ func (s *Stream) Collect() (*Result, error) {
 					// 完整协议终态已取得时，以聚合和生命周期发布后的事实为准。
 					<-s.done
 					s.mu.Lock()
-					result, cancelErr = s.result, s.streamErr
+					result, terminalErr := s.result, s.streamErr
 					s.mu.Unlock()
+					return result, terminalErr
 				}
 			}
-			return result, cancelErr
+			// 取消/失败分支必须等待 reader goroutine 退出，否则 Result 仍可能
+			// 被后台 finalize 修改，调用方还会泄漏底层 Body。
+			_ = s.Close()
+			s.mu.Lock()
+			finalResult := s.result
+			terminalErr := s.streamErr
+			s.mu.Unlock()
+			if terminalErr != nil {
+				return finalResult, terminalErr
+			}
+			return finalResult, cancelErr
 		}
 	}
+}
+
+func (s *Stream) closeSource() error {
+	s.sourceCloseOnce.Do(func() {
+		s.mu.Lock()
+		closer := s.closer
+		s.mu.Unlock()
+		if closer != nil {
+			s.sourceCloseErr = closer.Close()
+		}
+	})
+	return s.sourceCloseErr
 }
 
 // Close 关闭流并释放资源
@@ -591,13 +617,9 @@ func (s *Stream) Close() error {
 	}
 	s.closed = true
 	s.cancel()
-	closer := s.closer
 	s.mu.Unlock()
 
-	var closeErr error
-	if closer != nil {
-		closeErr = closer.Close()
-	}
+	closeErr := s.closeSource()
 
 	// 关闭底层 reader 后再等待，确保阻塞中的 ReadString 能被唤醒。
 	s.wg.Wait()
@@ -792,6 +814,7 @@ func (s *Stream) finishTerminal() {
 	s.onTerminal = nil
 	s.mu.Unlock()
 
+	_ = s.closeSource()
 	close(s.chunks)
 	defer close(s.done)
 	for _, callback := range callbacks {

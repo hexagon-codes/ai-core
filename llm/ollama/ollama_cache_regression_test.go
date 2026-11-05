@@ -309,7 +309,7 @@ func TestWhitespaceOnlyStreamReleasesPendingNumCtxWithoutExplicitClose(t *testin
 	assertStickyNumCtxCacheEmpty(t, p)
 }
 
-func TestUnterminatedStreamChunkReleasesPendingNumCtxWithoutExplicitClose(t *testing.T) {
+func TestUnterminatedSuccessfulStreamPromotesNumCtxWithoutExplicitClose(t *testing.T) {
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 		w.Header().Set("Content-Type", "application/x-ndjson")
 		fmt.Fprint(w, `{"message":{"content":"unterminated"},"done":true}`)
@@ -324,7 +324,14 @@ func TestUnterminatedStreamChunkReleasesPendingNumCtxWithoutExplicitClose(t *tes
 	if _, err := stream.Collect(); err != nil {
 		t.Fatalf("Collect() error = %v", err)
 	}
-	assertStickyNumCtxCacheEmpty(t, p)
+	p.stickyNumCtxMu.Lock()
+	stickyCount := len(p.stickyNumCtx)
+	pendingCount := len(p.pendingNumCtx)
+	p.stickyNumCtxMu.Unlock()
+	if stickyCount != 1 || pendingCount != 0 {
+		t.Fatalf("sticky/pending = %d/%d, want 1/0 for successful final frame", stickyCount, pendingCount)
+	}
+	assertStickyNumCtxCacheConsistent(t, p)
 }
 
 func TestCanceledStreamReleasesPendingNumCtxWithoutExplicitClose(t *testing.T) {

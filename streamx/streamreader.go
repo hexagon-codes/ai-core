@@ -1834,14 +1834,21 @@ func Batch[T any](sr *StreamReader[T], size int) *StreamReader[[]T] {
 }
 
 type batchReader[T any] struct {
-	source *StreamReader[T]
-	size   int
-	mu     sync.Mutex
+	source     *StreamReader[T]
+	size       int
+	mu         sync.Mutex
+	pendingErr error
 }
 
 func (br *batchReader[T]) recv() ([]T, error) {
 	br.mu.Lock()
 	defer br.mu.Unlock()
+
+	if br.pendingErr != nil {
+		err := br.pendingErr
+		br.pendingErr = nil
+		return nil, err
+	}
 
 	batch := make([]T, 0, br.size)
 	for len(batch) < br.size {
@@ -1854,6 +1861,7 @@ func (br *batchReader[T]) recv() ([]T, error) {
 		}
 		if err != nil {
 			if len(batch) > 0 {
+				br.pendingErr = err
 				return batch, nil
 			}
 			return nil, err
@@ -1884,15 +1892,22 @@ func Window[T any](sr *StreamReader[T], size int) *StreamReader[[]T] {
 }
 
 type windowReader[T any] struct {
-	source *StreamReader[T]
-	size   int
-	buffer []T
-	mu     sync.Mutex
+	source     *StreamReader[T]
+	size       int
+	buffer     []T
+	mu         sync.Mutex
+	pendingErr error
 }
 
 func (wr *windowReader[T]) recv() ([]T, error) {
 	wr.mu.Lock()
 	defer wr.mu.Unlock()
+
+	if wr.pendingErr != nil {
+		err := wr.pendingErr
+		wr.pendingErr = nil
+		return nil, err
+	}
 
 	// 填充初始窗口
 	for len(wr.buffer) < wr.size {
@@ -1924,6 +1939,7 @@ func (wr *windowReader[T]) recv() ([]T, error) {
 	}
 	if err != nil {
 		wr.buffer = nil
+		wr.pendingErr = err
 		return result, nil
 	}
 	wr.buffer = append(wr.buffer[1:], item)

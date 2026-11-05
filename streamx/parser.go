@@ -27,6 +27,11 @@ type openAIChunk struct {
 	Object  string `json:"object"`
 	Created int64  `json:"created"`
 	Model   string `json:"model"`
+	Error   *struct {
+		Message string `json:"message"`
+		Type    string `json:"type"`
+		Code    any    `json:"code"`
+	} `json:"error,omitempty"`
 	Choices []struct {
 		Index int `json:"index"`
 		Delta struct {
@@ -59,6 +64,12 @@ func (p *OpenAIParser) Parse(data []byte) (*Chunk, error) {
 	var oai openAIChunk
 	if err := json.Unmarshal(data, &oai); err != nil {
 		return nil, err
+	}
+	if oai.Error != nil {
+		if oai.Error.Message == "" {
+			return nil, fmt.Errorf("openai stream error")
+		}
+		return nil, fmt.Errorf("openai stream error: %s", oai.Error.Message)
 	}
 
 	chunk := &Chunk{
@@ -127,7 +138,11 @@ func (p *OpenAIParser) IsDone(data []byte) bool {
 //   - message_delta: 消息级别的增量更新
 //   - message_stop: 消息结束
 type ClaudeParser struct {
-	stopReason string
+	stopReason    string
+	inputTokens   int
+	outputTokens  int
+	cacheCreation int
+	cacheRead     int
 }
 
 // claudeEvent 是 Claude 流式响应的事件结构
@@ -153,9 +168,15 @@ type claudeEvent struct {
 		PartialJSON string `json:"partial_json,omitempty"`
 	} `json:"delta,omitempty"`
 	Usage *struct {
-		InputTokens  int `json:"input_tokens"`
-		OutputTokens int `json:"output_tokens"`
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
 	} `json:"usage,omitempty"`
+	Error *struct {
+		Type    string `json:"type"`
+		Message string `json:"message"`
+	} `json:"error,omitempty"`
 }
 
 type claudeMessage struct {
@@ -165,6 +186,12 @@ type claudeMessage struct {
 	Model        string `json:"model"`
 	StopReason   string `json:"stop_reason,omitempty"`
 	StopSequence string `json:"stop_sequence,omitempty"`
+	Usage        *struct {
+		InputTokens              int `json:"input_tokens"`
+		OutputTokens             int `json:"output_tokens"`
+		CacheCreationInputTokens int `json:"cache_creation_input_tokens"`
+		CacheReadInputTokens     int `json:"cache_read_input_tokens"`
+	} `json:"usage,omitempty"`
 }
 
 // Parse 解析 Claude 格式的事件数据为 Chunk
@@ -183,12 +210,24 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 	}
 
 	switch evt.Type {
+	case "error":
+		if evt.Error == nil {
+			return nil, fmt.Errorf("claude stream error")
+		}
+		return nil, fmt.Errorf("claude stream error: %s", evt.Error.Message)
 	case "message_start":
 		p.stopReason = ""
 		if evt.Message != nil {
 			chunk.ID = evt.Message.ID
 			chunk.Role = evt.Message.Role
 			chunk.Model = evt.Message.Model
+			if evt.Message.Usage != nil {
+				p.inputTokens = evt.Message.Usage.InputTokens
+				p.outputTokens = evt.Message.Usage.OutputTokens
+				p.cacheCreation = evt.Message.Usage.CacheCreationInputTokens
+				p.cacheRead = evt.Message.Usage.CacheReadInputTokens
+				chunk.Usage = p.usage()
+			}
 		}
 
 	case "content_block_start":
@@ -226,6 +265,19 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 				p.stopReason = evt.Delta.StopReason
 			}
 		}
+		if evt.Usage != nil {
+			if evt.Usage.InputTokens > 0 || p.inputTokens == 0 {
+				p.inputTokens = evt.Usage.InputTokens
+			}
+			p.outputTokens = evt.Usage.OutputTokens
+			if evt.Usage.CacheCreationInputTokens > 0 {
+				p.cacheCreation = evt.Usage.CacheCreationInputTokens
+			}
+			if evt.Usage.CacheReadInputTokens > 0 {
+				p.cacheRead = evt.Usage.CacheReadInputTokens
+			}
+			chunk.Usage = p.usage()
+		}
 
 	case "message_stop":
 		// 这里只表示传输结束，不能覆盖 message_delta 已报告的实际停止原因。
@@ -236,6 +288,19 @@ func (p *ClaudeParser) Parse(data []byte) (*Chunk, error) {
 	}
 
 	return chunk, nil
+}
+
+func (p *ClaudeParser) usage() *Usage {
+	if p.inputTokens == 0 && p.outputTokens == 0 && p.cacheCreation == 0 && p.cacheRead == 0 {
+		return nil
+	}
+	return &Usage{
+		PromptTokens:        p.inputTokens,
+		CompletionTokens:    p.outputTokens,
+		TotalTokens:         p.inputTokens + p.outputTokens,
+		CacheCreationTokens: p.cacheCreation,
+		CacheReadTokens:     p.cacheRead,
+	}
 }
 
 // IsDone 检查是否为 Claude 的流结束事件
