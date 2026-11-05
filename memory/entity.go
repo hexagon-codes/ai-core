@@ -150,6 +150,14 @@ type EntityMemory struct {
 	// extractionQueue 提取队列（批量提取优化）
 	extractionQueue []Entry
 	queueMu         sync.Mutex
+
+	// asyncCtx/asyncCancel 控制异步提取的生命周期；Close 时取消。
+	asyncCtx    context.Context
+	asyncCancel context.CancelFunc
+	closeOnce   sync.Once
+
+	// generation 在 Clear/Close 时递增，用于丢弃在途提取的过期结果。
+	generation uint64
 }
 
 // EntityConfig 实体记忆配置
@@ -171,9 +179,6 @@ type EntityConfig struct {
 
 	// MaxSourcesPerEntity 每个实体最大来源数量
 	MaxSourcesPerEntity int
-
-	// MergeThreshold 实体合并相似度阈值
-	MergeThreshold float32
 }
 
 // DefaultEntityConfig 返回默认配置
@@ -185,7 +190,6 @@ func DefaultEntityConfig() EntityConfig {
 		MaxEntities:           1000,
 		MaxRelationsPerEntity: 100,
 		MaxSourcesPerEntity:   500,
-		MergeThreshold:        0.8,
 	}
 }
 
@@ -238,6 +242,7 @@ func NewEntityMemory(extractor EntityExtractor, opts ...EntityOption) *EntityMem
 	}
 
 	m.buffer = NewBuffer(m.config.BufferCapacity)
+	m.asyncCtx, m.asyncCancel = context.WithCancel(context.Background())
 	return m
 }
 
@@ -246,6 +251,7 @@ func NewEntityMemory(extractor EntityExtractor, opts ...EntityOption) *EntityMem
 func (m *EntityMemory) Save(ctx context.Context, entry Entry) error {
 	// 保存到缓冲区
 	m.mu.Lock()
+	generation := m.generation
 	err := m.buffer.Save(ctx, entry)
 	m.mu.Unlock()
 	if err != nil {
@@ -267,9 +273,10 @@ func (m *EntityMemory) Save(ctx context.Context, entry Entry) error {
 	// 触发提取
 	if shouldExtract && len(entriesToExtract) > 0 {
 		if m.config.AsyncExtraction {
-			go m.extractEntities(context.Background(), entriesToExtract)
+			ctx := m.asyncCtx
+			go m.extractEntities(ctx, entriesToExtract, generation)
 		} else {
-			if err := m.extractEntities(ctx, entriesToExtract); err != nil {
+			if err := m.extractEntities(ctx, entriesToExtract, generation); err != nil {
 				// 提取失败不影响保存
 				_ = err
 			}
@@ -277,6 +284,21 @@ func (m *EntityMemory) Save(ctx context.Context, entry Entry) error {
 	}
 
 	return nil
+}
+
+// Close 取消仍在进行的异步实体提取。多次调用安全。
+func (m *EntityMemory) Close() {
+	if m == nil {
+		return
+	}
+	m.closeOnce.Do(func() {
+		m.mu.Lock()
+		m.generation++
+		m.mu.Unlock()
+		if m.asyncCancel != nil {
+			m.asyncCancel()
+		}
+	})
 }
 
 // SaveBatch 批量保存记忆条目
@@ -314,6 +336,7 @@ func (m *EntityMemory) Delete(ctx context.Context, id string) error {
 func (m *EntityMemory) Clear(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.generation++
 	m.entities = make(map[string]*Entity)
 	m.queueMu.Lock()
 	m.extractionQueue = m.extractionQueue[:0]
@@ -365,7 +388,7 @@ func (m *EntityMemory) GetEntity(name string) (*Entity, bool) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entity, ok := m.entities[normalizeEntityName(name)]
-	return entity, ok
+	return cloneEntity(entity), ok
 }
 
 // GetEntities 获取所有实体
@@ -375,7 +398,7 @@ func (m *EntityMemory) GetEntities() []*Entity {
 
 	entities := make([]*Entity, 0, len(m.entities))
 	for _, entity := range m.entities {
-		entities = append(entities, entity)
+		entities = append(entities, cloneEntity(entity))
 	}
 	return entities
 }
@@ -391,7 +414,7 @@ func (m *EntityMemory) SearchEntities(query string) []*Entity {
 	for _, entity := range m.entities {
 		if strings.Contains(strings.ToLower(entity.Name), query) ||
 			strings.Contains(strings.ToLower(entity.Description), query) {
-			results = append(results, entity)
+			results = append(results, cloneEntity(entity))
 		}
 	}
 
@@ -406,7 +429,7 @@ func (m *EntityMemory) GetEntitiesByType(entityType EntityType) []*Entity {
 	var results []*Entity
 	for _, entity := range m.entities {
 		if entity.Type == entityType {
-			results = append(results, entity)
+			results = append(results, cloneEntity(entity))
 		}
 	}
 	return results
@@ -430,7 +453,7 @@ func (m *EntityMemory) GetRelatedEntities(name string) []*Entity {
 		normalizedTarget := normalizeEntityName(rel.TargetName)
 		if !seen[normalizedTarget] {
 			if target, ok := m.entities[normalizedTarget]; ok {
-				related = append(related, target)
+				related = append(related, cloneEntity(target))
 				seen[normalizedTarget] = true
 			}
 		}
@@ -508,7 +531,7 @@ func (m *EntityMemory) GetContextWithEntities(entityNames ...string) string {
 }
 
 // extractEntities 提取实体
-func (m *EntityMemory) extractEntities(ctx context.Context, entries []Entry) error {
+func (m *EntityMemory) extractEntities(ctx context.Context, entries []Entry, generation uint64) error {
 	if m.extractor == nil {
 		return nil
 	}
@@ -534,6 +557,11 @@ func (m *EntityMemory) extractEntities(ctx context.Context, entries []Entry) err
 	// 更新实体库
 	m.mu.Lock()
 	defer m.mu.Unlock()
+
+	// Clear/Close 已发生过：丢弃在途提取结果，避免清空后重新填充。
+	if generation != m.generation {
+		return nil
+	}
 
 	now := time.Now()
 
@@ -562,6 +590,9 @@ func (m *EntityMemory) extractEntities(ctx context.Context, entries []Entry) err
 			}
 		} else {
 			// 创建新实体
+			if m.config.MaxEntities > 0 && len(m.entities) >= m.config.MaxEntities {
+				continue
+			}
 			m.entities[normalizedName] = &Entity{
 				Name:           extracted.Name,
 				Type:           extracted.Type,
@@ -612,6 +643,10 @@ func (m *EntityMemory) extractEntities(ctx context.Context, entries []Entry) err
 
 // FlushExtractionQueue 刷新提取队列（立即处理）
 func (m *EntityMemory) FlushExtractionQueue(ctx context.Context) error {
+	m.mu.RLock()
+	generation := m.generation
+	m.mu.RUnlock()
+
 	m.queueMu.Lock()
 	if len(m.extractionQueue) == 0 {
 		m.queueMu.Unlock()
@@ -622,7 +657,7 @@ func (m *EntityMemory) FlushExtractionQueue(ctx context.Context) error {
 	m.extractionQueue = m.extractionQueue[:0]
 	m.queueMu.Unlock()
 
-	return m.extractEntities(ctx, entriesToExtract)
+	return m.extractEntities(ctx, entriesToExtract, generation)
 }
 
 // AddEntity 手动添加实体
@@ -630,8 +665,15 @@ func (m *EntityMemory) AddEntity(entity *Entity) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if entity == nil {
+		return
+	}
 	normalizedName := normalizeEntityName(entity.Name)
 	if normalizedName == "" {
+		return
+	}
+	if _, exists := m.entities[normalizedName]; !exists &&
+		m.config.MaxEntities > 0 && len(m.entities) >= m.config.MaxEntities {
 		return
 	}
 
@@ -649,7 +691,7 @@ func (m *EntityMemory) AddEntity(entity *Entity) {
 		entity.Relations = make([]EntityRelation, 0)
 	}
 
-	m.entities[normalizedName] = entity
+	m.entities[normalizedName] = cloneEntity(entity)
 }
 
 // AddRelation 手动添加实体关系
@@ -661,6 +703,9 @@ func (m *EntityMemory) AddRelation(sourceName, targetName, relationType, descrip
 	entity, ok := m.entities[normalizedSource]
 	if !ok {
 		return fmt.Errorf("源实体 %s 不存在", sourceName)
+	}
+	if m.config.MaxRelationsPerEntity > 0 && len(entity.Relations) >= m.config.MaxRelationsPerEntity {
+		return fmt.Errorf("实体 %s 关系数量已达到上限", sourceName)
 	}
 
 	entity.Relations = append(entity.Relations, EntityRelation{
@@ -676,6 +721,23 @@ func (m *EntityMemory) AddRelation(sourceName, targetName, relationType, descrip
 // normalizeEntityName 规范化实体名称
 func normalizeEntityName(name string) string {
 	return strings.ToLower(strings.TrimSpace(name))
+}
+
+// cloneEntity 返回实体的独立副本，避免调用方绕过锁修改内部状态。
+func cloneEntity(entity *Entity) *Entity {
+	if entity == nil {
+		return nil
+	}
+	cloned := *entity
+	if entity.Attributes != nil {
+		cloned.Attributes = make(map[string]any, len(entity.Attributes))
+		for key, value := range entity.Attributes {
+			cloned.Attributes[key] = value
+		}
+	}
+	cloned.Relations = append([]EntityRelation(nil), entity.Relations...)
+	cloned.Sources = append([]string(nil), entity.Sources...)
+	return &cloned
 }
 
 // ============== LLM 实体提取器 ==============

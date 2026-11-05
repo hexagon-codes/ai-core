@@ -3,6 +3,7 @@ package memory
 import (
 	"context"
 	"errors"
+	"reflect"
 	"sync"
 	"time"
 
@@ -302,7 +303,7 @@ func matchQuery(entry Entry, query SearchQuery) bool {
 			return false
 		}
 		for k, v := range query.Metadata {
-			if mv, ok := entry.Metadata[k]; !ok || mv != v {
+			if mv, ok := entry.Metadata[k]; !ok || !equalMetadataValue(mv, v) {
 				return false
 			}
 		}
@@ -317,6 +318,15 @@ func matchQuery(entry Entry, query SearchQuery) bool {
 	}
 
 	return true
+}
+
+// equalMetadataValue 比较两个元数据值，避免对 slice/map 等不可比较类型
+// 直接使用接口 != 导致运行时 panic。语义与 encoding/json 的标量比较一致。
+func equalMetadataValue(a, b any) bool {
+	if reflect.TypeOf(a) != reflect.TypeOf(b) {
+		return false
+	}
+	return reflect.DeepEqual(a, b)
 }
 
 // Delete 删除指定 ID 的记忆条目

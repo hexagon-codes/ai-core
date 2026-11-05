@@ -286,9 +286,12 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 	defer m.mu.RUnlock()
 
 	var allEntries []Entry
+	var errs []error
 
 	// 从工作记忆搜索
-	if entries, err := m.working.Search(ctx, query); err == nil {
+	if entries, err := m.working.Search(ctx, query); err != nil {
+		errs = append(errs, fmt.Errorf("working memory: %w", err))
+	} else {
 		for i := range entries {
 			entries[i].Metadata = addLayerMeta(entries[i].Metadata, LayerWorking)
 		}
@@ -297,7 +300,9 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 
 	// 从短期记忆搜索
 	if m.shortTerm != nil {
-		if entries, err := m.shortTerm.Search(ctx, query); err == nil {
+		if entries, err := m.shortTerm.Search(ctx, query); err != nil {
+			errs = append(errs, fmt.Errorf("short-term memory: %w", err))
+		} else {
 			for i := range entries {
 				entries[i].Metadata = addLayerMeta(entries[i].Metadata, LayerShortTerm)
 			}
@@ -307,7 +312,9 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 
 	// 从长期记忆搜索（语义检索）
 	if m.longTerm != nil && (query.Query != "" || len(query.Embedding) > 0) {
-		if entries, err := m.longTerm.Search(ctx, query); err == nil {
+		if entries, err := m.longTerm.Search(ctx, query); err != nil {
+			errs = append(errs, fmt.Errorf("long-term memory: %w", err))
+		} else {
 			for i := range entries {
 				entries[i].Metadata = addLayerMeta(entries[i].Metadata, LayerLongTerm)
 			}
@@ -320,6 +327,9 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 		allEntries = allEntries[:query.Limit]
 	}
 
+	if len(errs) > 0 {
+		return allEntries, errors.Join(errs...)
+	}
 	return allEntries, nil
 }
 
@@ -384,16 +394,23 @@ func (m *MultiLayerMemory) Clear(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	m.working.Clear(ctx)
+	var errs []error
+	if err := m.working.Clear(ctx); err != nil {
+		errs = append(errs, fmt.Errorf("working memory: %w", err))
+	}
 	if m.shortTerm != nil {
-		m.shortTerm.Clear(ctx)
+		if err := m.shortTerm.Clear(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("short-term memory: %w", err))
+		}
 	}
 	if m.longTerm != nil {
-		m.longTerm.Clear(ctx)
+		if err := m.longTerm.Clear(ctx); err != nil {
+			errs = append(errs, fmt.Errorf("long-term memory: %w", err))
+		}
 	}
 
 	m.stats = MultiLayerStats{}
-	return nil
+	return errors.Join(errs...)
 }
 
 // ClearLayer 清空指定层
@@ -473,10 +490,11 @@ func (m *MultiLayerMemory) GetContext(ctx context.Context, query string) ([]Entr
 
 	// 添加相关长期记忆
 	if m.longTerm != nil && query != "" {
-		relevantMemories, _ := m.longTerm.SemanticSearch(ctx, query, m.config.LongTerm.TopK)
-		for _, mem := range relevantMemories {
-			context = append(context, mem)
+		relevantMemories, err := m.longTerm.SemanticSearch(ctx, query, m.config.LongTerm.TopK)
+		if err != nil {
+			return nil, fmt.Errorf("long-term memory: %w", err)
 		}
+		context = append(context, relevantMemories...)
 	}
 
 	// 添加工作记忆

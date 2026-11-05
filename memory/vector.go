@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"math"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -54,7 +55,9 @@ type VectorResult struct {
 type VectorMemory struct {
 	// 条目存储
 	entries map[string]*Entry
-	mu      sync.RWMutex
+	// order 记录条目插入顺序，用于 Capacity 淘汰。
+	order []string
+	mu    sync.RWMutex
 
 	// 向量嵌入器
 	embedder Embedder
@@ -153,6 +156,9 @@ func (m *VectorMemory) Save(ctx context.Context, entry Entry) error {
 
 	// 在获取锁之前生成向量嵌入（避免持锁调用外部服务导致阻塞）
 	if len(entry.Embedding) == 0 && entry.Content != "" {
+		if m.embedder == nil {
+			return fmt.Errorf("vector memory: embedder is nil")
+		}
 		embeddings, err := m.embedder.Embed(ctx, []string{entry.Content})
 		if err != nil {
 			return fmt.Errorf("generate embedding: %w", err)
@@ -167,10 +173,9 @@ func (m *VectorMemory) Save(ctx context.Context, entry Entry) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 保存条目
-	m.entries[entry.ID] = &entry
+	_, existed := m.entries[entry.ID]
 
-	// 保存向量到存储
+	// 先写向量库，成功后再发布内存条目，避免 Add 失败时内存与向量库不一致。
 	if len(entry.Embedding) > 0 {
 		metadata := map[string]any{
 			"id":         entry.ID,
@@ -185,7 +190,28 @@ func (m *VectorMemory) Save(ctx context.Context, entry Entry) error {
 		}
 	}
 
+	m.entries[entry.ID] = &entry
+	if !existed {
+		m.order = append(m.order, entry.ID)
+	}
+	m.evictLocked(ctx)
 	return nil
+}
+
+// evictLocked 按 Capacity 淘汰最旧条目；调用者必须持有 m.mu。
+func (m *VectorMemory) evictLocked(ctx context.Context) {
+	if m.config.Capacity <= 0 {
+		return
+	}
+	for len(m.order) > m.config.Capacity {
+		oldest := m.order[0]
+		if err := m.store.Delete(ctx, oldest); err != nil {
+			// 删除失败时保留条目和顺序，等待下次 Save 重试，避免内存与向量库分叉。
+			return
+		}
+		delete(m.entries, oldest)
+		m.order = m.order[1:]
+	}
 }
 
 // SaveBatch 批量保存记忆条目
@@ -202,6 +228,9 @@ func (m *VectorMemory) SaveBatch(ctx context.Context, entries []Entry) error {
 	}
 
 	if len(textsToEmbed) > 0 {
+		if m.embedder == nil {
+			return fmt.Errorf("vector memory: embedder is nil")
+		}
 		embeddings, err := m.embedder.Embed(ctx, textsToEmbed)
 		if err != nil {
 			return fmt.Errorf("batch generate embeddings: %w", err)
@@ -232,7 +261,8 @@ func (m *VectorMemory) Get(ctx context.Context, id string) (*Entry, error) {
 	if !ok {
 		return nil, ErrNotFound
 	}
-	return entry, nil
+	cloned := cloneEntry(entry)
+	return &cloned, nil
 }
 
 // Search 搜索记忆条目
@@ -240,6 +270,9 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 	topK := query.Limit
 	if topK <= 0 {
 		topK = m.config.DefaultTopK
+		if topK <= 0 {
+			topK = 10
+		}
 	}
 
 	// 在获取锁之前生成查询向量（避免持锁调用外部服务导致阻塞）
@@ -247,6 +280,9 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 	if len(query.Embedding) > 0 {
 		embedding = query.Embedding
 	} else if query.Query != "" {
+		if m.embedder == nil {
+			return nil, fmt.Errorf("vector memory: embedder is nil")
+		}
 		embeddings, err := m.embedder.Embed(ctx, []string{query.Query})
 		if err != nil {
 			return nil, fmt.Errorf("generate query embedding: %w", err)
@@ -256,12 +292,19 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 		}
 	}
 
+	offset := query.Offset
+	if offset < 0 {
+		offset = 0
+	}
+
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
 	if len(embedding) > 0 {
-		// 向量搜索
-		results, err := m.store.Search(ctx, embedding, topK)
+		// 向量搜索。先多取 offset 条，过滤后再统一分页，避免 offset 被
+		// 底层 store 的 topK 截断。
+		fetchLimit := topK + offset
+		results, err := m.store.Search(ctx, embedding, fetchLimit)
 		if err != nil {
 			return nil, fmt.Errorf("vector search: %w", err)
 		}
@@ -276,7 +319,7 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 				if !matchQuery(*entry, query) {
 					continue
 				}
-				entryCopy := *entry
+				entryCopy := cloneEntry(entry)
 				// 添加分数到元数据
 				if entryCopy.Metadata == nil {
 					entryCopy.Metadata = make(map[string]any)
@@ -285,7 +328,10 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 				entries = append(entries, entryCopy)
 			}
 		}
-		return entries, nil
+		if query.OrderBy != "" && !strings.EqualFold(query.OrderBy, "score") {
+			sortEntries(entries, query.OrderBy, query.OrderDesc)
+		}
+		return paginateEntries(entries, query), nil
 	}
 
 	// 普通搜索（按时间排序）
@@ -294,31 +340,45 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 		if !matchQuery(*entry, query) {
 			continue
 		}
-		entries = append(entries, *entry)
+		entries = append(entries, cloneEntry(entry))
 	}
 
-	// 排序
-	sort.Slice(entries, func(i, j int) bool {
-		if query.OrderDesc {
-			return entries[i].CreatedAt.After(entries[j].CreatedAt)
-		}
-		return entries[i].CreatedAt.Before(entries[j].CreatedAt)
-	})
+	sortEntries(entries, query.OrderBy, query.OrderDesc)
+	return paginateEntries(entries, query), nil
+}
 
-	// 分页
+// sortEntries 按 SearchQuery.OrderBy 排序；空值保持既有的 created_at 默认行为。
+func sortEntries(entries []Entry, orderBy string, desc bool) {
+	switch strings.ToLower(strings.TrimSpace(orderBy)) {
+	case "updated_at":
+		if desc {
+			sort.Slice(entries, func(i, j int) bool { return entries[i].UpdatedAt.After(entries[j].UpdatedAt) })
+		} else {
+			sort.Slice(entries, func(i, j int) bool { return entries[i].UpdatedAt.Before(entries[j].UpdatedAt) })
+		}
+	default:
+		if desc {
+			sort.Slice(entries, func(i, j int) bool { return entries[i].CreatedAt.After(entries[j].CreatedAt) })
+		} else {
+			sort.Slice(entries, func(i, j int) bool { return entries[i].CreatedAt.Before(entries[j].CreatedAt) })
+		}
+	}
+}
+
+// paginateEntries 应用 Offset/Limit，返回共享底层切片的只读窗口。
+func paginateEntries(entries []Entry, query SearchQuery) []Entry {
 	start := query.Offset
 	if start < 0 {
 		start = 0
 	}
-	if start > len(entries) {
-		return nil, nil
+	if start >= len(entries) {
+		return nil
 	}
 	end := len(entries)
 	if query.Limit > 0 && start+query.Limit < end {
 		end = start + query.Limit
 	}
-
-	return entries[start:end], nil
+	return entries[start:end]
 }
 
 // SemanticSearch 语义搜索
@@ -337,8 +397,17 @@ func (m *VectorMemory) Delete(ctx context.Context, id string) error {
 	if _, ok := m.entries[id]; !ok {
 		return ErrNotFound
 	}
+	if err := m.store.Delete(ctx, id); err != nil {
+		return err
+	}
 	delete(m.entries, id)
-	return m.store.Delete(ctx, id)
+	for i, key := range m.order {
+		if key == id {
+			m.order = append(m.order[:i], m.order[i+1:]...)
+			break
+		}
+	}
+	return nil
 }
 
 // Clear 清空所有记忆
@@ -346,8 +415,12 @@ func (m *VectorMemory) Clear(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	if err := m.store.Clear(ctx); err != nil {
+		return err
+	}
 	m.entries = make(map[string]*Entry)
-	return m.store.Clear(ctx)
+	m.order = nil
+	return nil
 }
 
 // Stats 返回记忆统计信息
@@ -388,6 +461,46 @@ func generateVectorID() string {
 
 // ============== 内存向量存储 ==============
 
+// cloneMetadata 复制元数据 map，避免共享可变引用。
+func cloneMetadata(metadata map[string]any) map[string]any {
+	if metadata == nil {
+		return nil
+	}
+	cloned := make(map[string]any, len(metadata))
+	for key, value := range metadata {
+		cloned[key] = value
+	}
+	return cloned
+}
+
+// cloneEntry 返回条目副本，避免调用方绕过锁修改内部状态。
+func cloneEntry(entry *Entry) Entry {
+	if entry == nil {
+		return Entry{}
+	}
+	cloned := *entry
+	cloned.Embedding = append([]float32(nil), entry.Embedding...)
+	if entry.Metadata != nil {
+		cloned.Metadata = make(map[string]any, len(entry.Metadata))
+		for key, value := range entry.Metadata {
+			cloned.Metadata[key] = value
+		}
+	}
+	if entry.Media != nil {
+		cloned.Media = make([]MediaRef, len(entry.Media))
+		for i, media := range entry.Media {
+			cloned.Media[i] = media
+			if media.Metadata != nil {
+				cloned.Media[i].Metadata = make(map[string]any, len(media.Metadata))
+				for key, value := range media.Metadata {
+					cloned.Media[i].Metadata[key] = value
+				}
+			}
+		}
+	}
+	return cloned
+}
+
 // MemoryVectorStore 内存向量存储
 type MemoryVectorStore struct {
 	vectors   map[string]vectorEntry
@@ -414,8 +527,8 @@ func (s *MemoryVectorStore) Add(ctx context.Context, id string, embedding []floa
 	defer s.mu.Unlock()
 
 	s.vectors[id] = vectorEntry{
-		embedding: embedding,
-		metadata:  metadata,
+		embedding: append([]float32(nil), embedding...),
+		metadata:  cloneMetadata(metadata),
 	}
 	return nil
 }
@@ -447,7 +560,7 @@ func (s *MemoryVectorStore) Search(ctx context.Context, query []float32, topK in
 		results = append(results, VectorResult{
 			ID:       id,
 			Score:    score,
-			Metadata: entry.metadata,
+			Metadata: cloneMetadata(entry.metadata),
 		})
 	}
 

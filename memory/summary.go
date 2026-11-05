@@ -2,11 +2,16 @@ package memory
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
 	"time"
 )
+
+// ErrSummaryInProgress 表示已有摘要任务在执行；并发调用方应稍后重试，
+// 避免在自定义 Summarizer 回调记忆方法时形成不可重入死锁。
+var ErrSummaryInProgress = errors.New("memory: summary already in progress")
 
 // Summarizer 摘要生成器接口
 // 通常由 LLM Provider 实现
@@ -33,6 +38,9 @@ type SummaryMemory struct {
 
 	// 互斥锁
 	mu sync.RWMutex
+
+	// summarizeMu 串行化摘要任务，避免多个外部摘要调用互相覆盖结果。
+	summarizeMu sync.Mutex
 }
 
 // SummaryConfig 摘要配置
@@ -132,16 +140,20 @@ func NewSummaryMemory(summarizer Summarizer, opts ...SummaryOption) *SummaryMemo
 
 // Save 保存记忆条目
 func (m *SummaryMemory) Save(ctx context.Context, entry Entry) error {
-	// 先保存到 buffer（buffer 有自己的锁）
-	if err := m.buffer.Save(ctx, entry); err != nil {
+	// 与 doSummarize 的 Clear/回写临界区使用同一把锁，避免并发 Save 的条目
+	// 在“快照后、清理前”被丢弃。
+	m.mu.Lock()
+	err := m.buffer.Save(ctx, entry)
+	shouldSummarize := err == nil && m.shouldSummarize()
+	m.mu.Unlock()
+	if err != nil {
 		return err
 	}
 
-	// 检查是否需要触发摘要（不持有锁检查，因为 doSummarize 会调用外部服务）
-	if m.shouldSummarize() {
+	// 摘要会调用外部服务，必须在锁外执行；summarizeMu 负责串行化摘要任务。
+	if shouldSummarize {
 		if err := m.doSummarize(ctx); err != nil {
 			// 摘要失败不影响保存
-			// 可以记录日志
 			_ = err
 		}
 	}
@@ -268,6 +280,15 @@ func (m *SummaryMemory) shouldSummarize() bool {
 // doSummarize 执行摘要
 // 注意：调用此方法时不应持有 m.mu 锁，因为它会调用外部服务
 func (m *SummaryMemory) doSummarize(ctx context.Context) error {
+	if !m.summarizeMu.TryLock() {
+		return ErrSummaryInProgress
+	}
+	defer m.summarizeMu.Unlock()
+
+	if m.summarizer == nil {
+		return fmt.Errorf("summary memory: summarizer is nil")
+	}
+
 	entries := m.buffer.Entries()
 	if len(entries) <= m.config.KeepRecent {
 		return nil
