@@ -136,7 +136,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.GeminiFormat), nil
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.GeminiFormat)
+	stream.SetParser(streamx.NewTerminalValidatingParser(&streamx.GeminiParser{}))
+	return stream, nil
 }
 
 // Models 返回可用模型列表

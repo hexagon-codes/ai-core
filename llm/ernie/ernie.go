@@ -26,6 +26,8 @@ const (
 	defaultBaseURL = "https://aip.baidubce.com/rpc/2.0/ai_custom/v1/wenxinworkshop"
 	tokenURL       = "https://aip.baidubce.com/oauth/2.0/token"
 	defaultModel   = "ernie-4.0-8k"
+	// ernieMaxResponseBytes 限制成功响应体大小，避免异常上游导致无界内存增长。
+	ernieMaxResponseBytes = 32 << 20
 )
 
 // 编译期接口断言：*Provider 满足 llm.Provider 契约。
@@ -108,9 +110,12 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	}
 	defer resp.Body.Close()
 
-	data, err := io.ReadAll(resp.Body)
+	data, err := io.ReadAll(io.LimitReader(resp.Body, ernieMaxResponseBytes+1))
 	if err != nil {
 		return nil, fmt.Errorf("ernie read response failed: %w", err)
+	}
+	if len(data) > ernieMaxResponseBytes {
+		return nil, fmt.Errorf("ernie response exceeds %d bytes", ernieMaxResponseBytes)
 	}
 
 	return p.parseResponse(data)
@@ -136,7 +141,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, fmt.Errorf("ernie stream failed: %w", err)
 	}
 
-	return streamx.NewStreamWithParser(resp.Body, &ernieStreamParser{}), nil
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat)
+	stream.SetParser(streamx.NewTerminalValidatingParser(&ernieStreamParser{}))
+	return stream, nil
 }
 
 // Models 返回支持的模型列表

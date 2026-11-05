@@ -153,8 +153,10 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		return nil, err
 	}
 
-	// 通义千问使用 OpenAI 兼容格式
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat), nil
+	// 通义千问使用 OpenAI 兼容格式；补齐终态校验，避免截断流被当成成功。
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat)
+	stream.SetParser(streamx.NewTerminalValidatingParser(&streamx.OpenAIParser{}))
+	return stream, nil
 }
 
 // Models 返回可用模型列表

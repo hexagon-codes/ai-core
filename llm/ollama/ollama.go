@@ -294,7 +294,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		resp.Body = &numCtxReservationReadCloser{ReadCloser: resp.Body, reservation: reservation}
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(parser), nil
+	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(
+		streamx.NewTerminalValidatingParser(parser),
+	), nil
 }
 
 // Models 返回可用模型列表
