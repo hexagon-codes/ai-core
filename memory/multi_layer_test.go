@@ -36,7 +36,7 @@ func TestMultiLayerMemory_Get(t *testing.T) {
 	}
 
 	if found == nil {
-		t.Error("expected to find entry")
+		t.Fatal("expected to find entry")
 	}
 
 	if found.Content != "Test" {

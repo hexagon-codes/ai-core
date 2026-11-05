@@ -273,7 +273,6 @@ type jsonArrayParser[T any] struct {
 	inArray bool
 	depth   int
 	itemBuf strings.Builder
-	mu      sync.Mutex
 }
 
 func (p *jsonArrayParser[T]) parse() {

@@ -344,6 +344,5 @@ func (p *ernieStreamParser) IsDone(data []byte) bool {
 	var r struct {
 		IsEnd bool `json:"is_end"`
 	}
-	json.Unmarshal(data, &r)
-	return r.IsEnd
+	return json.Unmarshal(data, &r) == nil && r.IsEnd
 }

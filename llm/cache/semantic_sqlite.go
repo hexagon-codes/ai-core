@@ -115,6 +115,9 @@ func (c *SemanticCache) LoadFromDB(db *sql.DB) {
 			break
 		}
 	}
+	if err := rows.Err(); err != nil {
+		logger.Error("[cache] 读取 SQLite 缓存失败", "error", err)
+	}
 
 	if loaded > 0 {
 		logger.Info("[cache] 从 SQLite 恢复", "loaded", loaded)
@@ -151,7 +154,10 @@ func (c *SemanticCache) PersistToDB(db *sql.DB) {
 	defer tx.Rollback()
 
 	// 清理过期条目
-	tx.Exec("DELETE FROM llm_cache WHERE expires_at <= ? OR trim(response) = ''", now)
+	if _, err := tx.Exec("DELETE FROM llm_cache WHERE expires_at <= ? OR trim(response) = ''", now); err != nil {
+		logger.Error("[cache] 清理持久化过期条目失败", "error", err)
+		return
+	}
 
 	stmt, err := tx.Prepare(
 		`INSERT OR REPLACE INTO llm_cache (key, response, provider, model, hit_count, created_at, expires_at)

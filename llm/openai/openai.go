@@ -500,7 +500,7 @@ func trustedOpenAIReasoningEffort(req llm.CompletionRequest) (string, bool) {
 		}
 	}
 	if req.ReasoningPolicyScope != llm.ReasoningPolicyScopeStructuredVisionRecognition ||
-		strings.EqualFold(strings.TrimSpace(req.Model), "gpt-5.6-sol") == false {
+		!strings.EqualFold(strings.TrimSpace(req.Model), "gpt-5.6-sol") {
 		return "", false
 	}
 	enabled, err := reasoningIntent(req.Metadata)
