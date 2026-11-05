@@ -290,6 +290,9 @@ func (m *VectorMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 		if len(embeddings) > 0 {
 			embedding = embeddings[0]
 		}
+		if len(embedding) == 0 {
+			return nil, fmt.Errorf("embedder returned empty query embedding")
+		}
 	}
 
 	offset := query.Offset

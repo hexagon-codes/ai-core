@@ -66,6 +66,34 @@ func TestEntityMemoryGetEntityReturnsDefensiveCopy(t *testing.T) {
 	}
 }
 
+func TestEntityMemoryGeneratedIDsAreUsedForSources(t *testing.T) {
+	t.Parallel()
+
+	extractor := &mockEntityExtractor{result: &ExtractionResult{
+		Entities: []ExtractedEntity{{Name: "Alice", Type: EntityTypePerson}},
+	}}
+	mem := NewEntityMemory(extractor, WithAsyncExtraction(false), WithBatchSize(1))
+	ctx := context.Background()
+
+	if err := mem.Save(ctx, NewUserEntry("Alice is here")); err != nil {
+		t.Fatalf("Save() error = %v", err)
+	}
+	entity, ok := mem.GetEntity("Alice")
+	if !ok {
+		t.Fatal("entity not extracted")
+	}
+	if len(entity.Sources) != 1 || entity.Sources[0] == "" {
+		t.Fatalf("entity Sources = %v, want one generated entry ID", entity.Sources)
+	}
+	contextEntries, err := mem.GetEntityContext(ctx, "Alice")
+	if err != nil {
+		t.Fatalf("GetEntityContext() error = %v", err)
+	}
+	if len(contextEntries) != 1 || contextEntries[0].ID != entity.Sources[0] {
+		t.Fatalf("GetEntityContext() = %+v, want source entry", contextEntries)
+	}
+}
+
 type blockingEntityExtractor struct {
 	once    sync.Once
 	started chan struct{}

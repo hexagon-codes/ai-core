@@ -285,11 +285,19 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	// 各层只负责取候选；Offset/Limit 必须在合并后统一应用，否则每层
+	// 各自分页会让长期记忆结果被工作记忆直接截断。
+	layerQuery := query
+	layerQuery.Offset = 0
+	if query.Limit > 0 {
+		layerQuery.Limit = query.Limit + max(query.Offset, 0)
+	}
+
 	var allEntries []Entry
 	var errs []error
 
 	// 从工作记忆搜索
-	if entries, err := m.working.Search(ctx, query); err != nil {
+	if entries, err := m.working.Search(ctx, layerQuery); err != nil {
 		errs = append(errs, fmt.Errorf("working memory: %w", err))
 	} else {
 		for i := range entries {
@@ -300,7 +308,7 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 
 	// 从短期记忆搜索
 	if m.shortTerm != nil {
-		if entries, err := m.shortTerm.Search(ctx, query); err != nil {
+		if entries, err := m.shortTerm.Search(ctx, layerQuery); err != nil {
 			errs = append(errs, fmt.Errorf("short-term memory: %w", err))
 		} else {
 			for i := range entries {
@@ -312,7 +320,7 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 
 	// 从长期记忆搜索（语义检索）
 	if m.longTerm != nil && (query.Query != "" || len(query.Embedding) > 0) {
-		if entries, err := m.longTerm.Search(ctx, query); err != nil {
+		if entries, err := m.longTerm.Search(ctx, layerQuery); err != nil {
 			errs = append(errs, fmt.Errorf("long-term memory: %w", err))
 		} else {
 			for i := range entries {
@@ -322,9 +330,22 @@ func (m *MultiLayerMemory) Search(ctx context.Context, query SearchQuery) ([]Ent
 		}
 	}
 
-	// 应用限制
-	if query.Limit > 0 && len(allEntries) > query.Limit {
-		allEntries = allEntries[:query.Limit]
+	if query.OrderBy != "" {
+		sortEntries(allEntries, query.OrderBy, query.OrderDesc)
+	}
+
+	start := query.Offset
+	if start < 0 {
+		start = 0
+	}
+	if start >= len(allEntries) {
+		allEntries = nil
+	} else {
+		end := len(allEntries)
+		if query.Limit > 0 && start+query.Limit < end {
+			end = start + query.Limit
+		}
+		allEntries = allEntries[start:end]
 	}
 
 	if len(errs) > 0 {
@@ -356,6 +377,9 @@ func (m *MultiLayerMemory) SearchLayer(ctx context.Context, layer MemoryLayer, q
 
 // Delete 删除指定 ID 的记忆条目
 func (m *MultiLayerMemory) Delete(ctx context.Context, id string) error {
+	m.transferMu.Lock()
+	defer m.transferMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -391,6 +415,9 @@ func (m *MultiLayerMemory) Delete(ctx context.Context, id string) error {
 
 // Clear 清空所有记忆
 func (m *MultiLayerMemory) Clear(ctx context.Context) error {
+	m.transferMu.Lock()
+	defer m.transferMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -415,6 +442,9 @@ func (m *MultiLayerMemory) Clear(ctx context.Context) error {
 
 // ClearLayer 清空指定层
 func (m *MultiLayerMemory) ClearLayer(ctx context.Context, layer MemoryLayer) error {
+	m.transferMu.Lock()
+	defer m.transferMu.Unlock()
+
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
@@ -431,7 +461,7 @@ func (m *MultiLayerMemory) ClearLayer(ctx context.Context, layer MemoryLayer) er
 		}
 	}
 
-	return nil
+	return fmt.Errorf("layer %s not available", layer)
 }
 
 // Stats 返回记忆统计信息
@@ -475,31 +505,33 @@ func (m *MultiLayerMemory) MultiStats() MultiLayerStats {
 // 返回工作记忆 + 短期摘要 + 相关长期记忆
 func (m *MultiLayerMemory) GetContext(ctx context.Context, query string) ([]Entry, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	summary := ""
+	if m.shortTerm != nil {
+		summary = m.shortTerm.GetSummary()
+	}
+	workingEntries := m.working.Entries()
+	longTerm := m.longTerm
+	m.mu.RUnlock()
 
 	var context []Entry
-
-	// 添加短期记忆摘要
-	if m.shortTerm != nil && m.shortTerm.GetSummary() != "" {
+	if summary != "" {
 		context = append(context, Entry{
 			ID:      "summary",
 			Role:    "system",
-			Content: fmt.Sprintf("对话历史摘要: %s", m.shortTerm.GetSummary()),
+			Content: fmt.Sprintf("对话历史摘要: %s", summary),
 		})
 	}
 
-	// 添加相关长期记忆
-	if m.longTerm != nil && query != "" {
-		relevantMemories, err := m.longTerm.SemanticSearch(ctx, query, m.config.LongTerm.TopK)
+	// 长期记忆检索可能调用 embedder，放在锁外执行。
+	if longTerm != nil && query != "" {
+		relevantMemories, err := longTerm.SemanticSearch(ctx, query, m.config.LongTerm.TopK)
 		if err != nil {
 			return nil, fmt.Errorf("long-term memory: %w", err)
 		}
 		context = append(context, relevantMemories...)
 	}
 
-	// 添加工作记忆
-	context = append(context, m.working.Entries()...)
-
+	context = append(context, workingEntries...)
 	return context, nil
 }
 
@@ -516,33 +548,33 @@ func (m *MultiLayerMemory) transferWorkingToShortTerm(ctx context.Context) error
 		return nil
 	}
 
+	m.mu.Lock()
 	entries := m.working.Entries()
 	// 保留最近几条在工作记忆
 	keepCount := m.config.Working.Capacity / 2
 	if keepCount < 2 {
 		keepCount = 2
 	}
-
 	if len(entries) <= keepCount {
+		m.mu.Unlock()
 		return nil
 	}
-
-	// 转移较旧的条目到短期记忆
 	toTransfer := entries[:len(entries)-keepCount]
+	m.mu.Unlock()
+
+	// 摘要/外部服务在 m.mu 外执行，避免阻塞 Get/Search。
 	for _, entry := range toTransfer {
 		if err := m.shortTerm.Save(ctx, entry); err != nil {
 			return err
 		}
 	}
 
-	// 清理工作记忆，保留最近的
-	m.working.Clear(ctx)
-	for _, entry := range entries[len(entries)-keepCount:] {
-		m.working.Save(ctx, entry)
+	m.mu.Lock()
+	for _, entry := range toTransfer {
+		_ = m.working.Delete(ctx, entry.ID)
 	}
-
 	m.updateTransferStats()
-
+	m.mu.Unlock()
 	return nil
 }
 
@@ -592,9 +624,7 @@ func (m *MultiLayerMemory) Transfer(ctx context.Context) error {
 	m.transferMu.Lock()
 	defer m.transferMu.Unlock()
 
-	m.mu.Lock()
 	err := m.transferWorkingToShortTerm(ctx)
-	m.mu.Unlock()
 	if err != nil {
 		return err
 	}
@@ -608,25 +638,27 @@ func (m *MultiLayerMemory) Transfer(ctx context.Context) error {
 // Recall 从长期记忆回忆相关内容
 func (m *MultiLayerMemory) Recall(ctx context.Context, query string, topK int) ([]Entry, error) {
 	m.mu.RLock()
-	defer m.mu.RUnlock()
+	longTerm := m.longTerm
+	m.mu.RUnlock()
 
-	if m.longTerm == nil {
+	if longTerm == nil {
 		return nil, fmt.Errorf("long term memory not configured")
 	}
 
-	return m.longTerm.SemanticSearch(ctx, query, topK)
+	return longTerm.SemanticSearch(ctx, query, topK)
 }
 
 // SaveToLongTerm 直接保存到长期记忆
 func (m *MultiLayerMemory) SaveToLongTerm(ctx context.Context, entry Entry) error {
-	m.mu.Lock()
-	defer m.mu.Unlock()
+	m.mu.RLock()
+	longTerm := m.longTerm
+	m.mu.RUnlock()
 
-	if m.longTerm == nil {
+	if longTerm == nil {
 		return fmt.Errorf("long term memory not configured")
 	}
 
-	return m.longTerm.Save(ctx, entry)
+	return longTerm.Save(ctx, entry)
 }
 
 // addLayerMeta 添加层元数据

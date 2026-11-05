@@ -36,6 +36,9 @@ type SummaryMemory struct {
 	summary     string
 	summaryTime time.Time
 
+	// generation 在 Clear 时递增，用于丢弃在途摘要结果。
+	generation uint64
+
 	// 互斥锁
 	mu sync.RWMutex
 
@@ -183,6 +186,8 @@ func (m *SummaryMemory) Search(ctx context.Context, query SearchQuery) ([]Entry,
 
 // Delete 删除指定 ID 的记忆条目
 func (m *SummaryMemory) Delete(ctx context.Context, id string) error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
 	return m.buffer.Delete(ctx, id)
 }
 
@@ -191,6 +196,7 @@ func (m *SummaryMemory) Clear(ctx context.Context) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
+	m.generation++
 	m.summary = ""
 	m.summaryTime = time.Time{}
 	return m.buffer.Clear(ctx)
@@ -290,16 +296,16 @@ func (m *SummaryMemory) doSummarize(ctx context.Context) error {
 	}
 
 	entries := m.buffer.Entries()
-	if len(entries) <= m.config.KeepRecent {
+	keepRecent := m.config.KeepRecent
+	if keepRecent < 0 {
+		keepRecent = 0
+	}
+	if len(entries) <= keepRecent {
 		return nil
 	}
 
-	// 记录快照时的条目数，用于后续检测并发修改
-	snapshotLen := len(entries)
-
-	// 需要摘要的条目
-	toSummarize := entries[:len(entries)-m.config.KeepRecent]
-	recentEntries := entries[len(entries)-m.config.KeepRecent:]
+	// 需要摘要的条目；保留最近条目由 buffer 原样保留。
+	toSummarize := entries[:len(entries)-keepRecent]
 
 	// 构建待摘要内容
 	var content strings.Builder
@@ -307,8 +313,9 @@ func (m *SummaryMemory) doSummarize(ctx context.Context) error {
 		content.WriteString(fmt.Sprintf("%s: %s\n", entry.Role, entry.Content))
 	}
 
-	// 获取当前摘要（需要锁保护读取）
+	// 获取当前摘要和 generation（需要锁保护读取）
 	m.mu.RLock()
+	generation := m.generation
 	currentSummary := m.summary
 	progressiveSummary := m.config.ProgressiveSummary
 	summaryPrompt := m.config.SummaryPrompt
@@ -327,31 +334,20 @@ func (m *SummaryMemory) doSummarize(ctx context.Context) error {
 		return fmt.Errorf("summarize failed: %w", err)
 	}
 
-	// Hold the lock during the entire Clear + re-insert phase to prevent
-	// concurrent Save from losing data between Clear and re-insert (TOCTOU fix).
 	m.mu.Lock()
 	defer m.mu.Unlock()
 
-	// 更新摘要
+	// Clear 已发生过：不要把旧摘要或条目写回。
+	if generation != m.generation {
+		return nil
+	}
+
+	// 只删除实际参与摘要的条目；摘要期间 Delete/Clear 或新增的条目不受影响。
+	for _, entry := range toSummarize {
+		_ = m.buffer.Delete(ctx, entry.ID)
+	}
 	m.summary = newSummary
 	m.summaryTime = time.Now()
-
-	// 清理旧条目，只保留最近的
-	// 重新读取当前 entries，保留摘要期间新增的条目
-	currentEntries := m.buffer.Entries()
-	m.buffer.Clear(ctx)
-
-	// 保留快照时标记的 recentEntries
-	for _, entry := range recentEntries {
-		m.buffer.Save(ctx, entry)
-	}
-	// 保留摘要期间新增的条目（快照之后新写入的）
-	if len(currentEntries) > snapshotLen {
-		for _, entry := range currentEntries[snapshotLen:] {
-			m.buffer.Save(ctx, entry)
-		}
-	}
-
 	return nil
 }
 

@@ -249,6 +249,13 @@ func NewEntityMemory(extractor EntityExtractor, opts ...EntityOption) *EntityMem
 // Save 保存记忆条目
 // 保存后会触发实体提取（同步或异步）
 func (m *EntityMemory) Save(ctx context.Context, entry Entry) error {
+	if entry.ID == "" {
+		entry.ID = defaultIDGen()
+	}
+	if entry.CreatedAt.IsZero() {
+		entry.CreatedAt = time.Now()
+	}
+
 	// 保存到缓冲区
 	m.mu.Lock()
 	generation := m.generation

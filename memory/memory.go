@@ -199,6 +199,15 @@ func (m *BufferMemory) Save(ctx context.Context, entry Entry) error {
 	if entry.CreatedAt.IsZero() {
 		entry.CreatedAt = time.Now()
 	}
+	entry = cloneEntry(&entry)
+
+	// 同 ID 保存视为更新，保持 Get/Search 与溯源流程只看到最新版本。
+	for i := range m.entries {
+		if m.entries[i].ID == entry.ID {
+			m.entries[i] = entry
+			return nil
+		}
+	}
 
 	// 如果已达容量，移除最旧的条目
 	// 使用 copy 而不是 m.entries[1:] 避免底层数组内存泄漏
@@ -229,7 +238,7 @@ func (m *BufferMemory) Get(ctx context.Context, id string) (*Entry, error) {
 
 	for i := range m.entries {
 		if m.entries[i].ID == id {
-			entry := m.entries[i]
+			entry := cloneEntry(&m.entries[i])
 			return &entry, nil
 		}
 	}
@@ -247,7 +256,7 @@ func (m *BufferMemory) Search(ctx context.Context, query SearchQuery) ([]Entry, 
 		if !matchQuery(entry, query) {
 			continue
 		}
-		results = append(results, entry)
+		results = append(results, cloneEntry(&entry))
 	}
 
 	// 排序（默认按时间升序）
@@ -359,10 +368,22 @@ func (m *BufferMemory) Stats() MemoryStats {
 	stats := MemoryStats{
 		EntryCount: len(m.entries),
 	}
+	for i := range m.entries {
+		// 轻量估算，供 SummaryMemory.MaxTokens 阈值使用；精确计数由上层 tokenizer 提供。
+		stats.TokenCount += len([]rune(m.entries[i].Content))/4 + 1
+	}
 
 	if len(m.entries) > 0 {
 		oldest := m.entries[0].CreatedAt
-		newest := m.entries[len(m.entries)-1].CreatedAt
+		newest := m.entries[0].CreatedAt
+		for i := 1; i < len(m.entries); i++ {
+			if m.entries[i].CreatedAt.Before(oldest) {
+				oldest = m.entries[i].CreatedAt
+			}
+			if m.entries[i].CreatedAt.After(newest) {
+				newest = m.entries[i].CreatedAt
+			}
+		}
 		stats.OldestEntry = &oldest
 		stats.NewestEntry = &newest
 	}
@@ -375,7 +396,9 @@ func (m *BufferMemory) Entries() []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 	entries := make([]Entry, len(m.entries))
-	copy(entries, m.entries)
+	for i := range m.entries {
+		entries[i] = cloneEntry(&m.entries[i])
+	}
 	return entries
 }
 
@@ -384,15 +407,22 @@ func (m *BufferMemory) Last(n int) []Entry {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
 
+	if n <= 0 {
+		return nil
+	}
 	if n >= len(m.entries) {
 		entries := make([]Entry, len(m.entries))
-		copy(entries, m.entries)
+		for i := range m.entries {
+			entries[i] = cloneEntry(&m.entries[i])
+		}
 		return entries
 	}
 
 	start := len(m.entries) - n
 	entries := make([]Entry, n)
-	copy(entries, m.entries[start:])
+	for i := range entries {
+		entries[i] = cloneEntry(&m.entries[start+i])
+	}
 	return entries
 }
 

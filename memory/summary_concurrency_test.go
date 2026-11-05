@@ -69,6 +69,42 @@ func TestSummaryMemoryKeepsEntrySavedDuringSummarize(t *testing.T) {
 	}
 }
 
+func TestSummaryMemoryDeleteDuringSummarizeIsNotResurrected(t *testing.T) {
+	t.Parallel()
+
+	summarizer := &blockingSummarizer{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	mem := NewSummaryMemory(summarizer, WithMaxEntries(2), WithKeepRecent(1))
+	ctx := context.Background()
+	for _, id := range []string{"one", "two"} {
+		if err := mem.Save(ctx, Entry{ID: id, Role: "user", Content: id}); err != nil {
+			t.Fatalf("Save(%s) error = %v", id, err)
+		}
+	}
+
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- mem.Save(ctx, Entry{ID: "three", Role: "user", Content: "three"})
+	}()
+	select {
+	case <-summarizer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("summarizer did not start")
+	}
+	if err := mem.Delete(ctx, "one"); err != nil {
+		t.Fatalf("Delete(one) error = %v", err)
+	}
+	close(summarizer.release)
+	if err := <-saveDone; err != nil {
+		t.Fatalf("Save(three) error = %v", err)
+	}
+	if _, err := mem.Get(ctx, "one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("deleted entry resurrected: %v", err)
+	}
+}
+
 type reentrantSummarizer struct {
 	memory *SummaryMemory
 	err    error
