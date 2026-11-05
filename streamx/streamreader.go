@@ -1127,6 +1127,12 @@ func RegisterConcatFunc[T any](fn func([]T) (T, error)) {
 	concatFuncs.Store(key, fn)
 }
 
+// UnregisterConcatFunc 移除类型的合并函数，供测试隔离或运行期重置使用。
+func UnregisterConcatFunc[T any]() {
+	var zero T
+	concatFuncs.Delete(getTypeKey(zero))
+}
+
 // RegisterMergeFunc 注册类型的流合并函数（保留元信息）
 func RegisterMergeFunc[T any](fn func(items []T, sources []string) (T, error)) {
 	var zero T

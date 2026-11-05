@@ -2029,6 +2029,7 @@ func TestConcat_字符串拼接(t *testing.T) {
 	RegisterConcatFunc[string](func(items []string) (string, error) {
 		return strings.Join(items, ""), nil
 	})
+	t.Cleanup(func() { UnregisterConcatFunc[string]() })
 
 	reader := FromSlice([]string{"hello", " ", "world"})
 	ctx := context.Background()
@@ -2049,6 +2050,7 @@ func TestConcatItems_字符串拼接(t *testing.T) {
 	RegisterConcatFunc[string](func(items []string) (string, error) {
 		return strings.Join(items, "-"), nil
 	})
+	t.Cleanup(func() { UnregisterConcatFunc[string]() })
 
 	result, err := ConcatItems([]string{"a", "b", "c"})
 	if err != nil {
