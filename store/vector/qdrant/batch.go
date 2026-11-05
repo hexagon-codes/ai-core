@@ -1,6 +1,7 @@
 package qdrant
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -260,7 +261,9 @@ func (s *Store) Scroll(ctx context.Context, batchSize int, fn func(docs []vector
 		}
 
 		var scrollResp scrollResponse
-		if err := json.Unmarshal(resp, &scrollResp); err != nil {
+		decoder := json.NewDecoder(bytes.NewReader(resp))
+		decoder.UseNumber()
+		if err := decoder.Decode(&scrollResp); err != nil {
 			return fmt.Errorf("failed to parse scroll response: %w", err)
 		}
 

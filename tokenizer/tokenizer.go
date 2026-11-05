@@ -408,6 +408,9 @@ func EstimateCost(inputTokens, outputTokens int, pricing Pricing) float64 {
 // 用于将超长文本分批处理，避免超过模型限制
 // 使用二分查找确保每个块不超过 maxTokensPerChunk
 func (c *Counter) SplitByTokens(text string, maxTokensPerChunk int) []string {
+	if maxTokensPerChunk <= 0 {
+		return nil
+	}
 	if c.Count(text) <= maxTokensPerChunk {
 		return []string{text}
 	}

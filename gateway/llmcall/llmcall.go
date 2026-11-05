@@ -147,9 +147,8 @@ func CallWithProgress(ctx context.Context, req Request, onProgress ProgressFunc)
 		return nil, ctxErr
 	}
 
-	// 失败路径统一返回 (attempts=maxRetries) 包装错误，%w 保留 LLM 原文 error。
-	// 注意：无论是重试耗尽还是非瞬时错误提前停止，旧代码均落到此分支，故沿用 maxRetries。
-	return nil, fmt.Errorf("llmcall: 调用失败 (attempts=%d): %w", maxRetries, lastErr)
+	// 失败路径使用实际尝试次数；%w 保留 LLM 原文 error。
+	return nil, fmt.Errorf("llmcall: 调用失败 (attempts=%d): %w", attempts, lastErr)
 }
 
 // Call 不需要进度反馈时的快捷入口。
@@ -164,6 +163,17 @@ func Call(ctx context.Context, req Request) (*Response, error) {
 func isTransient(err error) bool {
 	if err == nil {
 		return false
+	}
+	var providerErr *llm.ProviderError
+	if errors.As(err, &providerErr) && providerErr.StatusCode > 0 {
+		switch providerErr.StatusCode {
+		case 408, 409, 429:
+			return true
+		case 400, 401, 402, 403, 404, 422:
+			return false
+		default:
+			return providerErr.StatusCode >= 500
+		}
 	}
 	msg := strings.ToLower(err.Error())
 	for _, k := range []string{

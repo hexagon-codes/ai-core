@@ -19,6 +19,7 @@ package vector
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"reflect"
 	"sort"
@@ -210,6 +211,9 @@ func (s *MemoryStore) Add(ctx context.Context, docs []Document) error {
 
 // Search 搜索相似文档
 func (s *MemoryStore) Search(ctx context.Context, query []float32, k int, opts ...SearchOption) ([]Document, error) {
+	if k <= 0 {
+		return nil, fmt.Errorf("vector: k must be positive")
+	}
 	// 检查 context 是否已取消
 	if err := ctx.Err(); err != nil {
 		return nil, err

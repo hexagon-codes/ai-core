@@ -190,7 +190,7 @@ func (c *SemanticCache) Do(input, provider, model string, fn func() (response, m
 		}
 		c.mu.Unlock()
 
-		resp, model, fnErr := fn()
+		resp, _, fnErr := fn()
 		if fnErr != nil {
 			return nil, fnErr
 		}

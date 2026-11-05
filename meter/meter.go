@@ -85,6 +85,18 @@ var defaultPricing = map[string]Pricing{
 	"claude-3-haiku":  {InputPrice: 0.25, OutputPrice: 1.25},
 	"gemini-pro":      {InputPrice: 0.5, OutputPrice: 1.5},
 	"deepseek":        {InputPrice: 0.14, OutputPrice: 0.28},
+
+	// 常见 Provider 实际返回的带版本/后缀模型 ID。
+	"deepseek-chat":              {InputPrice: 0.14, OutputPrice: 0.28},
+	"deepseek-reasoner":          {InputPrice: 0.55, OutputPrice: 2.19},
+	"claude-3-opus-20240229":     {InputPrice: 15.0, OutputPrice: 75.0},
+	"claude-3-5-sonnet-20241022": {InputPrice: 3.0, OutputPrice: 15.0},
+	"claude-3-5-haiku-20241022":  {InputPrice: 0.8, OutputPrice: 4.0},
+	"claude-sonnet-4-20250514":   {InputPrice: 3.0, OutputPrice: 15.0},
+	"claude-opus-4-20250514":     {InputPrice: 15.0, OutputPrice: 75.0},
+	"gemini-1.5-pro":             {InputPrice: 1.25, OutputPrice: 5.0},
+	"gemini-1.5-flash":           {InputPrice: 0.075, OutputPrice: 0.3},
+	"gemini-2.0-flash":           {InputPrice: 0.1, OutputPrice: 0.4},
 }
 
 // DefaultMaxRecords 默认最大记录数
@@ -107,6 +119,7 @@ const DefaultMaxRecords = 100000
 type Meter struct {
 	records    []Record           // 详细记录列表
 	pricing    map[string]Pricing // 模型定价表
+	modelCosts map[string]float64 // 按模型累计成本，避免记录裁剪后口径漂移
 	maxRecords int                // 最大记录数，0 表示无限制
 	mu         sync.RWMutex       // 保护 records 的读写锁
 
@@ -159,6 +172,7 @@ func NewWithOptions(pricing map[string]Pricing, maxRecords int) *Meter {
 	return &Meter{
 		records:    make([]Record, 0),
 		pricing:    p,
+		modelCosts: make(map[string]float64),
 		maxRecords: maxRecords,
 	}
 }
@@ -230,9 +244,8 @@ func (m *Meter) RecordWithDetails(model string, inputTokens, outputTokens int, l
 		}
 		m.records = m.records[deleteCount:]
 	}
-	m.mu.Unlock()
 
-	// 更新计数器（累计统计，不受清理影响）
+	// 计数器、成本和记录在同一临界区更新，避免 Clear 与在途 Record 交错。
 	m.totalRequests.Add(1)
 	if success {
 		m.successRequests.Add(1)
@@ -243,16 +256,13 @@ func (m *Meter) RecordWithDetails(model string, inputTokens, outputTokens int, l
 		m.totalLatency.Add(int64(latency))
 		m.latencyCount.Add(1)
 	}
-
-	// 累计成本（以 float64 精度累加，与 records 清理无关）。
-	// 不做单条取整，使 Stats() 全局成本与 StatsByModel() 按模型成本一致。
-	m.mu.RLock()
 	if pricing, ok := m.pricing[model]; ok {
 		cost := float64(inputTokens)/1_000_000*pricing.InputPrice +
 			float64(outputTokens)/1_000_000*pricing.OutputPrice
+		m.modelCosts[model] += cost
 		m.addCost(cost)
 	}
-	m.mu.RUnlock()
+	m.mu.Unlock()
 }
 
 // Stats 返回所有请求的聚合统计信息
@@ -343,12 +353,7 @@ func (m *Meter) statsByModelLocked(model string) Stats {
 	}
 
 	stats.TotalTokens = stats.InputTokens + stats.OutputTokens
-
-	// 计算成本
-	if pricing, ok := m.pricing[model]; ok {
-		stats.EstimatedCost = float64(stats.InputTokens)/1_000_000*pricing.InputPrice +
-			float64(stats.OutputTokens)/1_000_000*pricing.OutputPrice
-	}
+	stats.EstimatedCost = m.modelCosts[model]
 
 	// 计算平均延迟
 	if latencyCount > 0 {
@@ -428,6 +433,7 @@ func (m *Meter) Clear() {
 	m.totalLatency.Store(0)
 	m.latencyCount.Store(0)
 	m.totalCost.Store(0)
+	m.modelCosts = make(map[string]float64)
 }
 
 // 注：totalCost 存的是 float64 bits；0.0 的 bits 恰为 0，故 Store(0) 即重置为 0.0。

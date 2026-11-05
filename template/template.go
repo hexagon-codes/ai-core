@@ -673,8 +673,15 @@ func (h *ChatHistory) Clear() *ChatHistory {
 // 用于截取最近的对话上下文
 // 如果 n 大于消息总数，返回所有消息
 func (h *ChatHistory) Last(n int) []Message {
-	if n >= len(h.messages) {
-		return h.messages
+	if n <= 0 {
+		return nil
 	}
-	return h.messages[len(h.messages)-n:]
+	if n >= len(h.messages) {
+		result := make([]Message, len(h.messages))
+		copy(result, h.messages)
+		return result
+	}
+	result := make([]Message, n)
+	copy(result, h.messages[len(h.messages)-n:])
+	return result
 }

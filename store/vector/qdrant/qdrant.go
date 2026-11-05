@@ -634,6 +634,8 @@ func (s *Store) fromPointID(id any, payload map[string]any) string {
 		return fmt.Sprintf("%d", int64(v))
 	case int64:
 		return fmt.Sprintf("%d", v)
+	case json.Number:
+		return v.String()
 	case string:
 		return v
 	default:
@@ -651,9 +653,16 @@ func (s *Store) buildFilter(filter map[string]any) map[string]any {
 	sort.Strings(keys)
 
 	for _, k := range keys {
+		match := map[string]any{"value": filter[k]}
+		switch values := filter[k].(type) {
+		case []string:
+			match = map[string]any{"any": values}
+		case []any:
+			match = map[string]any{"any": values}
+		}
 		conditions = append(conditions, map[string]any{
 			"key":   k,
-			"match": map[string]any{"value": filter[k]},
+			"match": match,
 		})
 	}
 

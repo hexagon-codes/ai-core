@@ -133,11 +133,11 @@ func (c *SemanticCache) PersistToDB(db *sql.DB) {
 	}
 
 	c.mu.RLock()
-	entries := make([]*Entry, 0, len(c.entries))
+	entries := make([]Entry, 0, len(c.entries))
 	now := time.Now()
 	for _, e := range c.entries {
 		if !c.isExpired(e, now) && strings.TrimSpace(e.Response) != "" {
-			entries = append(entries, e)
+			entries = append(entries, *e)
 		}
 	}
 	c.mu.RUnlock()

@@ -144,7 +144,7 @@ func (c *MemoryCache) Get(_ context.Context, key string) (*llm.CompletionRespons
 	}
 
 	c.hits.Add(1)
-	return entry.response, nil
+	return cloneCompletionResponse(entry.response), nil
 }
 
 // Set 缓存响应
@@ -159,8 +159,28 @@ func (c *MemoryCache) Set(_ context.Context, key string, resp *llm.CompletionRes
 
 	// 以裸 any 形式存放 *cacheEntry，保持指针标识，不做序列化。
 	// ttl ≤ 0 时底层语义为"永不过期"，与原实现 TTL=0 零值语义一致。
-	c.store.Set(key, &cacheEntry{response: resp}, c.ttl)
+	c.store.Set(key, &cacheEntry{response: cloneCompletionResponse(resp)}, c.ttl)
 	return nil
+}
+
+func cloneCompletionResponse(resp *llm.CompletionResponse) *llm.CompletionResponse {
+	if resp == nil {
+		return nil
+	}
+	cloned := *resp
+	cloned.ToolCalls = append([]llm.ToolCall(nil), resp.ToolCalls...)
+	if resp.UsageReceipt != nil {
+		usage := *resp.UsageReceipt
+		cloned.UsageReceipt = &usage
+	}
+	if resp.ReasoningReceipt != nil {
+		receipt := *resp.ReasoningReceipt
+		cloned.ReasoningReceipt = &receipt
+	}
+	if resp.ProviderContinuation != nil {
+		cloned.ProviderContinuation = resp.ProviderContinuation.Clone()
+	}
+	return &cloned
 }
 
 // Stats 返回缓存统计信息
