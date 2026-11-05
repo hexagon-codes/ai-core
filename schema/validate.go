@@ -223,7 +223,7 @@ func (v *Validator) validateNumericStringsDepth(schema, instance any, path strin
 		properties, _ := s["properties"].(map[string]any)
 		for name, property := range properties {
 			if item, exists := value[name]; exists {
-				if err := v.validateNumericStringsDepth(property, item, path+"/"+name, depth+1, seen); err != nil {
+				if err := v.validateNumericStringsDepth(property, item, path+"/"+name, depth+1, make(map[string]bool)); err != nil {
 					return err
 				}
 			}
@@ -233,7 +233,7 @@ func (v *Validator) validateNumericStringsDepth(schema, instance any, path strin
 				if _, declared := properties[name]; declared {
 					continue
 				}
-				if err := v.validateNumericStringsDepth(additional, item, path+"/"+name, depth+1, seen); err != nil {
+				if err := v.validateNumericStringsDepth(additional, item, path+"/"+name, depth+1, make(map[string]bool)); err != nil {
 					return err
 				}
 			}
@@ -243,19 +243,19 @@ func (v *Validator) validateNumericStringsDepth(schema, instance any, path strin
 		for index, item := range value {
 			itemPath := fmt.Sprintf("%s/%d", path, index)
 			if index < len(prefix) {
-				if err := v.validateNumericStringsDepth(prefix[index], item, itemPath, depth+1, seen); err != nil {
+				if err := v.validateNumericStringsDepth(prefix[index], item, itemPath, depth+1, make(map[string]bool)); err != nil {
 					return err
 				}
 				continue
 			}
 			switch items := s["items"].(type) {
 			case map[string]any:
-				if err := v.validateNumericStringsDepth(items, item, itemPath, depth+1, seen); err != nil {
+				if err := v.validateNumericStringsDepth(items, item, itemPath, depth+1, make(map[string]bool)); err != nil {
 					return err
 				}
 			case []any:
 				if index < len(items) {
-					if err := v.validateNumericStringsDepth(items[index], item, itemPath, depth+1, seen); err != nil {
+					if err := v.validateNumericStringsDepth(items[index], item, itemPath, depth+1, make(map[string]bool)); err != nil {
 						return err
 					}
 				}

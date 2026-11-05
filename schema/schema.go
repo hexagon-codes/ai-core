@@ -364,7 +364,8 @@ func (g *typeGenerator) buildValue(t reflect.Type) *Schema {
 	case reflect.Struct:
 		return g.fromStruct(t)
 	case reflect.Interface:
-		return &Schema{Type: "object"}
+		// interface{} / any 在 encoding/json 中可为任意 JSON 值，不能收窄为 object。
+		return &Schema{}
 	default:
 		return &Schema{Type: "object"}
 	}
