@@ -21,7 +21,7 @@ import (
 // 持久化只依赖 database/sql（stdlib）+ 调用方传入的 *sql.DB（含 llm_cache 表），
 // 本包不引入任何具体 SQL driver —— driver 由调用方注册（如 hexclaw 用 modernc.org/sqlite）。
 func (c *SemanticCache) StartCleanupLoop(ctx context.Context, db *sql.DB, interval time.Duration) func() {
-	if !c.enabled || interval <= 0 {
+	if !c.isEnabled() || interval <= 0 {
 		return func() {}
 	}
 	loopCtx, cancel := context.WithCancel(ctx)
@@ -76,7 +76,7 @@ func (c *SemanticCache) runCleanup(db *sql.DB) {
 //
 // 在应用启动时调用，恢复上次运行的缓存数据，减少冷启动后的 API 开销。
 func (c *SemanticCache) LoadFromDB(db *sql.DB) {
-	if !c.enabled || db == nil {
+	if !c.isEnabled() || db == nil {
 		return
 	}
 	if _, err := db.Exec("DELETE FROM llm_cache WHERE trim(response) = ''"); err != nil {
@@ -125,7 +125,7 @@ func (c *SemanticCache) LoadFromDB(db *sql.DB) {
 //
 // 在应用关闭前调用，确保缓存数据不会随进程退出而丢失。
 func (c *SemanticCache) PersistToDB(db *sql.DB) {
-	if !c.enabled || db == nil {
+	if !c.isEnabled() || db == nil {
 		return
 	}
 

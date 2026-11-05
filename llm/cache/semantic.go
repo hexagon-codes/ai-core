@@ -116,9 +116,16 @@ func (c *SemanticCache) Reconfigure(cfg SemanticOptions) {
 	}
 }
 
+// isEnabled 读取当前启用状态；调用方不得持有 c.mu。
+func (c *SemanticCache) isEnabled() bool {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.enabled
+}
+
 // Get 查询缓存（按 input + provider + model 隔离，避免不同模型回复互相命中）
 func (c *SemanticCache) Get(input, provider, model string) (string, bool) {
-	if !c.enabled {
+	if !c.isEnabled() {
 		return "", false
 	}
 
@@ -161,7 +168,7 @@ func (c *SemanticCache) getLocked(key string) (string, bool) {
 // 如果缓存命中直接返回；否则使用 singleflight 确保
 // 同一 key 只有一个 goroutine 调用 fn（LLM 调用等耗时操作）。
 func (c *SemanticCache) Do(input, provider, model string, fn func() (response, model string, err error)) (string, error) {
-	if !c.enabled {
+	if !c.isEnabled() {
 		resp, _, err := fn()
 		return resp, err
 	}
@@ -198,7 +205,7 @@ func (c *SemanticCache) Do(input, provider, model string, fn func() (response, m
 
 // Put 存入缓存
 func (c *SemanticCache) Put(input, response, provider, model string) {
-	if !c.enabled {
+	if !c.isEnabled() {
 		return
 	}
 	if strings.TrimSpace(response) == "" {
