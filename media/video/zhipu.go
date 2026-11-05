@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -191,7 +192,7 @@ func (z *zhipuCogVideoX) Poll(ctx context.Context, taskID string) (TaskStatus, e
 		Provider:  z.Name(),
 		Action:    "video.poll",
 		Method:    http.MethodGet,
-		URL:       z.baseURL + "/async-result/" + taskID,
+		URL:       z.baseURL + "/async-result/" + url.PathEscape(taskID),
 		Client:    z.httpc,
 		Transport: z.tx,
 		Timeout:   z.timeout,

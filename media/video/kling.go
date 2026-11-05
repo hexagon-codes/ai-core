@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -173,7 +174,7 @@ func (p *klingProvider) Submit(ctx context.Context, req Request) (string, error)
 		Provider:  p.Name(),
 		Action:    "video.submit",
 		Method:    http.MethodPost,
-		URL:       p.baseURL + "/videos/" + kind,
+		URL:       p.baseURL + "/videos/" + url.PathEscape(kind),
 		Body:      payload,
 		Client:    p.httpc,
 		Transport: p.transport,
@@ -210,7 +211,7 @@ func (p *klingProvider) Poll(ctx context.Context, taskID string) (TaskStatus, er
 		Provider:  p.Name(),
 		Action:    "video.poll",
 		Method:    http.MethodGet,
-		URL:       p.baseURL + "/videos/" + kind + "/" + rawID,
+		URL:       p.baseURL + "/videos/" + url.PathEscape(kind) + "/" + url.PathEscape(rawID),
 		Client:    p.httpc,
 		Transport: p.transport,
 		Headers:   p.headers,

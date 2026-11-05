@@ -1,12 +1,11 @@
 package voice
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -174,8 +173,8 @@ func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string, opts Synthe
 		return nil, err
 	}
 	defer resp.Body.Close()
-	var buf bytes.Buffer
-	if _, err := io.Copy(&buf, io.LimitReader(resp.Body, 50<<20)); err != nil {
+	audio, err := readVoiceBody(resp.Body, 50<<20, "elevenlabs")
+	if err != nil {
 		return nil, fmt.Errorf("elevenlabs: read audio: %w", err)
 	}
 	format := opts.Format
@@ -183,17 +182,15 @@ func (t *ElevenLabsTTS) Synthesize(ctx context.Context, text string, opts Synthe
 		format = FormatMP3
 	}
 	return &SynthesizeResult{
-		Audio:     buf.Bytes(),
+		Audio:     audio,
 		Format:    format,
-		Size:      buf.Len(),
+		Size:      len(audio),
 		RequestID: resp.Header.Get("request-id"),
 	}, nil
 }
 
 func urlPathEscape(s string) string {
-	s = strings.TrimSpace(s)
-	s = strings.ReplaceAll(s, "/", "%2F")
-	return s
+	return url.PathEscape(strings.TrimSpace(s))
 }
 
 var _ TTSProvider = (*ElevenLabsTTS)(nil)

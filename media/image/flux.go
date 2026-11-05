@@ -168,7 +168,7 @@ func (p *fluxProvider) Submit(ctx context.Context, req Request) (string, error) 
 		Provider:  p.Name(),
 		Action:    "image.submit",
 		Method:    http.MethodPost,
-		URL:       p.baseURL + "/" + model,
+		URL:       p.baseURL + "/" + url.PathEscape(model),
 		Body:      payload,
 		Client:    p.httpc,
 		Transport: p.transport,

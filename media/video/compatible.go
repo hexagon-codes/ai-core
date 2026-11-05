@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -197,7 +198,7 @@ func (p *compatibleProvider) Poll(ctx context.Context, taskID string) (TaskStatu
 		Provider:  p.cfg.Name,
 		Action:    "video.poll",
 		Method:    http.MethodGet,
-		URL:       p.cfg.BaseURL + strings.ReplaceAll(p.cfg.PollPathTemplate, "{task_id}", taskID),
+		URL:       p.cfg.BaseURL + strings.ReplaceAll(p.cfg.PollPathTemplate, "{task_id}", url.PathEscape(taskID)),
 		Client:    p.httpc,
 		Transport: p.transport,
 		Headers:   p.headers,

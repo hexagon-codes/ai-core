@@ -25,7 +25,6 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -167,7 +166,7 @@ func (t *MiniMaxTTS) Synthesize(ctx context.Context, text string, opts Synthesiz
 	}
 	defer resp.Body.Close()
 
-	respBody, err := io.ReadAll(io.LimitReader(resp.Body, 120<<20))
+	respBody, err := readVoiceBody(resp.Body, 120<<20, "minimax-tts")
 	if err != nil {
 		return nil, fmt.Errorf("minimax: read response: %w", err)
 	}

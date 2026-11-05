@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
 
@@ -196,7 +197,7 @@ func (p *viduProvider) Poll(ctx context.Context, taskID string) (TaskStatus, err
 		Provider:  p.Name(),
 		Action:    "video.poll",
 		Method:    http.MethodGet,
-		URL:       p.baseURL + "/ent/v2/tasks/" + taskID + "/creations",
+		URL:       p.baseURL + "/ent/v2/tasks/" + url.PathEscape(taskID) + "/creations",
 		Client:    p.httpc,
 		Transport: p.transport,
 		Headers:   p.headers,

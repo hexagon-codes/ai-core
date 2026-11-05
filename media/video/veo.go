@@ -185,6 +185,9 @@ func (p *veoProvider) Poll(ctx context.Context, taskID string) (TaskStatus, erro
 	if !strings.HasPrefix(path, "operations/") && !strings.HasPrefix(path, "models/") {
 		path = "operations/" + path
 	}
+	if strings.Contains(path, "..") || strings.ContainsAny(path, "?#") {
+		return TaskStatus{}, fmt.Errorf("google-veo: invalid operation name")
+	}
 	resp, err := transport.Do(ctx, transport.Request{
 		Provider:  p.Name(),
 		Action:    "video.poll",

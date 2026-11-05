@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
 	"strings"
 	"time"
@@ -293,7 +292,7 @@ func (t *AzureTTS) Synthesize(ctx context.Context, text string, opts SynthesizeO
 	}
 	defer resp.Body.Close()
 
-	audio, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20)) // 50MB 限制
+	audio, err := readVoiceBody(resp.Body, 50<<20, "azure-tts")
 	if err != nil {
 		return nil, fmt.Errorf("读取音频数据失败: %w", err)
 	}

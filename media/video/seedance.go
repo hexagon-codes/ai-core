@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -264,7 +265,7 @@ func (p *seedanceProvider) Poll(ctx context.Context, taskID string) (TaskStatus,
 		Provider:  p.name,
 		Action:    "video.poll",
 		Method:    http.MethodGet,
-		URL:       p.baseURL + "/contents/generations/tasks/" + taskID,
+		URL:       p.baseURL + "/contents/generations/tasks/" + url.PathEscape(taskID),
 		Client:    p.httpc,
 		Transport: p.transport,
 		Headers:   p.headers,
@@ -277,9 +278,12 @@ func (p *seedanceProvider) Poll(ctx context.Context, taskID string) (TaskStatus,
 		return TaskStatus{}, err
 	}
 	defer resp.Body.Close()
-	body, err := io.ReadAll(io.LimitReader(resp.Body, 4<<20))
+	body, err := io.ReadAll(io.LimitReader(resp.Body, (4<<20)+1))
 	if err != nil {
 		return TaskStatus{}, fmt.Errorf("%s: read poll response: %w", p.name, err)
+	}
+	if len(body) > 4<<20 {
+		return TaskStatus{}, fmt.Errorf("%s: poll response exceeds %d bytes", p.name, 4<<20)
 	}
 	var parsed map[string]any
 	if err := json.Unmarshal(body, &parsed); err != nil {

@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
 	"mime/multipart"
 	"net/http"
 	"regexp"
@@ -370,7 +369,7 @@ func (t *OpenAITTS) Synthesize(ctx context.Context, text string, opts Synthesize
 	defer resp.Body.Close()
 
 	// 读取音频数据（50MB 限制）
-	audio, err := io.ReadAll(io.LimitReader(resp.Body, 50<<20))
+	audio, err := readVoiceBody(resp.Body, 50<<20, "openai-tts")
 	if err != nil {
 		return nil, fmt.Errorf("读取音频数据失败: %w", err)
 	}
