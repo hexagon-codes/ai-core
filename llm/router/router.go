@@ -395,14 +395,14 @@ func (r *Router) leastCostSelect(available []string, model string) (llm.Provider
 	var minCost float64
 	var selected string
 
-	for i, name := range available {
+	for _, name := range available {
 		provider := r.providers[name]
 		for _, m := range provider.Models() {
 			if model != "" && m.ID != model {
 				continue
 			}
 			cost := m.InputCost + m.OutputCost
-			if i == 0 || cost < minCost {
+			if selected == "" || cost < minCost {
 				minCost = cost
 				selected = name
 			}
@@ -531,6 +531,9 @@ type HealthChecker struct {
 
 // NewHealthChecker 创建健康检查器
 func NewHealthChecker(router *Router, interval time.Duration) *HealthChecker {
+	if interval <= 0 {
+		interval = time.Minute
+	}
 	return &HealthChecker{
 		router:   router,
 		interval: interval,
@@ -540,6 +543,9 @@ func NewHealthChecker(router *Router, interval time.Duration) *HealthChecker {
 
 // Start 启动健康检查
 func (h *HealthChecker) Start(ctx context.Context) {
+	if h == nil || h.router == nil {
+		return
+	}
 	go func() {
 		ticker := time.NewTicker(h.interval)
 		defer ticker.Stop()

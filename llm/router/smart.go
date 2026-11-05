@@ -482,6 +482,18 @@ func (r *SmartRouter) Route(ctx context.Context, req llm.CompletionRequest, rout
 		return nil, fmt.Errorf("没有满足条件的候选模型")
 	}
 
+	// 成本/延迟约束是硬约束，不能只作为评分项降低权重。
+	filtered := candidates[:0]
+	for _, c := range candidates {
+		if r.meetsHardConstraints(c, routingCtx, req) {
+			filtered = append(filtered, c)
+		}
+	}
+	candidates = filtered
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("没有满足成本或延迟约束的候选模型")
+	}
+
 	// 计算每个候选的得分
 	scoredCandidates := make([]scoredCandidate, 0, len(candidates))
 	for _, c := range candidates {
@@ -726,6 +738,36 @@ func (r *SmartRouter) getProfileLocked(modelID string) *ModelProfile {
 	r.profilesMu.RLock()
 	defer r.profilesMu.RUnlock()
 	return r.modelProfiles[modelID]
+}
+
+// meetsHardConstraints 检查候选是否满足显式成本/延迟上限。
+// 未知延迟不作为拒绝依据，避免把“尚无历史数据”误判为超限。
+func (r *SmartRouter) meetsHardConstraints(c candidate, ctx *RoutingContext, req llm.CompletionRequest) bool {
+	if ctx == nil {
+		return true
+	}
+	if ctx.Constraints.MaxCostPerRequest > 0 && r.estimateCost(c, req) > ctx.Constraints.MaxCostPerRequest {
+		return false
+	}
+	if ctx.Constraints.MaxLatencyMs > 0 {
+		if latency, known := r.knownLatency(c); known && latency > ctx.Constraints.MaxLatencyMs {
+			return false
+		}
+	}
+	return true
+}
+
+func (r *SmartRouter) knownLatency(c candidate) (int, bool) {
+	if c.profile != nil && c.profile.AverageLatencyMs > 0 {
+		return c.profile.AverageLatencyMs, true
+	}
+	r.mu.RLock()
+	latency := r.latencies[c.providerName]
+	r.mu.RUnlock()
+	if latency > 0 {
+		return int(latency.Milliseconds()), true
+	}
+	return 0, false
 }
 
 // calculateScore 计算候选模型的得分

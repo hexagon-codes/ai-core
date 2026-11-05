@@ -653,8 +653,12 @@ func (c *CompositeClassifier) Classify(ctx context.Context, req llm.CompletionRe
 	// 先使用规则分类
 	taskType, complexity := c.ruleClassifier.Classify(ctx, req)
 
-	// 如果是默认的 chat 类型，可能需要 LLM 确认
-	if taskType == TaskTypeChat && c.llmClassifier != nil {
+	// 规则命中非 chat 类型视为较高置信度；chat/无命中时按阈值决定是否交给 LLM 复核。
+	confidence := 0.9
+	if taskType == TaskTypeChat {
+		confidence = 0.3
+	}
+	if confidence < c.confidenceThreshold && c.llmClassifier != nil {
 		// 使用 LLM 分类器进行确认
 		llmTaskType, llmComplexity := c.llmClassifier.Classify(ctx, req)
 		if llmTaskType != TaskTypeChat {
