@@ -7,6 +7,7 @@ require (
 	github.com/hexagon-codes/toolkit v0.3.7
 	github.com/openai/openai-go/v3 v3.91.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
+	golang.org/x/text v0.42.0
 	modernc.org/sqlite v1.52.0
 )
 
@@ -22,7 +23,6 @@ require (
 	github.com/tidwall/sjson v1.2.5 // indirect
 	golang.org/x/sync v0.23.0 // indirect
 	golang.org/x/sys v0.48.0 // indirect
-	golang.org/x/text v0.42.0 // indirect
 	golang.org/x/time v0.8.0 // indirect
 	modernc.org/libc v1.72.3 // indirect
 	modernc.org/mathutil v1.7.1 // indirect

@@ -35,7 +35,7 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 ## 2026-11-04 Schema 与流修复
 
 - `json:",string"` 数值字段带 `min`/`max` 时，`Schema.Of` 生成显式 `x-hexagon-string-number` 标记；Validator 只对带标记的字符串执行数值边界检查。普通 `type:string` 上的 `minimum`/`maximum` 保持 JSON Schema 注解语义，不再被误当字符串内数值约束。
-- 字符串数值检查递归覆盖 `anyOf`/`oneOf`/`allOf`、`prefixItems`、`items`、JSON Pointer/`$anchor` 引用及 `$ref`/`$dynamicRef` 同级兄弟关键字；`anyOf`/`oneOf` 只对标准验证器实际匹配的分支执行自定义标记，不能用一个未选中分支误拒另一个合法分支。无法独立编译的分支不执行自定义标记，但标准整体约束仍生效；类型无法稳定恢复时显式返回错误。
+- 字符串数值约束通过编译器原生 vocabulary 扩展执行，与 `anyOf`/`oneOf`/`allOf`、条件及引用共同决议；`oneOf` 按包括数值约束在内的结果计算唯一匹配分支。文档内 `$id` 资源、相对引用、锚点及 `$dynamicRef` 由同一编译器处理，不另行重写引用或跳过无法独立编译的分支。signed 整数字符串接受 Go 支持的前导加号；带边界的浮点字符串接受合法前导加号与零，数值比较仍保留原始字面精度。普通标准 Schema 的字符串不因 `minimum`/`maximum` 被改成数值字符串。
 - `Copy` 的所有分支在源 EOF 时携带同一源关闭错误；`Collect` 不再把 `EOF + 清理失败` 当正常结束。`ForEach`/`Reduce` 在 ctx 取消时主动关闭源并返回取消原因，不无限阻塞，也不把取消伪装成 nil 成功。
 
 ## 精确Schema与合流适配
