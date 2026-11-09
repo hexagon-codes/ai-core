@@ -10,17 +10,27 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库，
 
 ## 本地开发
 
-提交前运行下面的 Verify 命令；这组检查与普通 PR 上的 `CI / Verify` 保持一致：
+提交前在最终工作区运行下面的 Verify 命令；这组检查与普通 PR 上的 `CI / Verify` 保持一致。先从 `go.mod` 选择工具链，再同时固定 `go` 和 `gofmt`，避免本机较新 Go 的行为掩盖最低支持版本的问题：
 
 ```bash
+set -euo pipefail
+export GOWORK=off
+export GOTOOLCHAIN="go$(awk '$1 == "go" { print $2; exit }' go.mod)"
+ci_goroot="$(go env GOROOT)"
+export PATH="$ci_goroot/bin:$PATH"
+export GOTOOLCHAIN=local
+go version
+
 test -z "$(gofmt -l .)"
 go mod tidy -diff
 go vet -mod=readonly ./...
+golangci-lint run --timeout=5m --enable-only=bodyclose,errcheck,ineffassign,staticcheck,unused --new-from-rev="${CI_BASE_REV:-origin/main}"
 go test -mod=readonly -count=1 ./...
-golangci-lint run --timeout=5m --enable-only=bodyclose,errcheck,ineffassign,staticcheck,unused --new-from-rev=origin/main
 ```
 
-本地使用与 CI 固定版本一致的 `golangci-lint`，并在执行前更新 `origin/main`。普通 Verify 只检查本次变更新增的 lint 问题，不会因仓库历史问题失败；代码提交不需要修改 CI 配置。
+本地使用 `.github/workflows/ci.yml` 指定版本的 `golangci-lint`。提交前更新 `origin/main` 并固定检查基线；修复已推送的失败提交时，设置 `CI_BASE_REV` 为该批变更前的成功提交，不能以已经包含待验代码的 `HEAD` 作为基线而漏查。普通 Verify 只检查本次变更新增的 lint 问题；代码提交不需要修改 CI 配置。
+
+执行 `go get` 或其他依赖更新后，先用同一工具链运行 `go mod tidy`，再审查 `go.mod` / `go.sum` 差异。`go get` 可能留下旧版本及当前导入链不使用的传递依赖校验和；仅构建成功或模块可下载不能替代 `go mod tidy -diff`。五项 Verify 均须针对同一最终工作区通过，不能用一次包级测试或旧提交的 CI 成功代替。
 
 `Security Audit` 负责依赖和可达代码的漏洞扫描，按工作流的定时计划或手动触发；它不是普通 PR 的 required check。`Release Preflight` 只在发布前手动触发，负责发布所需的 API 兼容性、漏洞和版本检查；通过后再创建不可移动的 SemVer tag。两者失败时都应修复对应的安全或发布问题，但不把外部漏洞数据库变化转化为普通代码提交失败。
 
