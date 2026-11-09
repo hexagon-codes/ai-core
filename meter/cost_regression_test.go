@@ -1,8 +1,11 @@
 package meter
 
-import "testing"
+import (
+	"math"
+	"testing"
+)
 
-func TestStatsByModelCostMatchesGlobalAfterPruning(t *testing.T) {
+func TestStatsByModelCostMatchesRetainedRecordsAfterPruning(t *testing.T) {
 	t.Parallel()
 
 	m := NewWithOptions(map[string]Pricing{
@@ -12,10 +15,18 @@ func TestStatsByModelCostMatchesGlobalAfterPruning(t *testing.T) {
 		m.Record("model-x", 1_000_000, 1_000_000)
 	}
 
-	globalCost := m.Stats().EstimatedCost
-	modelCost := m.StatsByModel("model-x").EstimatedCost
-	if modelCost != globalCost {
-		t.Fatalf("StatsByModel cost = %v, global = %v", modelCost, globalCost)
+	byModel := m.StatsByModel("model-x")
+	want := float64(byModel.InputTokens)/1_000_000*10 + float64(byModel.OutputTokens)/1_000_000*20
+	if math.Abs(byModel.EstimatedCost-want) > 1e-9 {
+		t.Fatalf("StatsByModel cost = %v, want %v from retained tokens", byModel.EstimatedCost, want)
+	}
+	if byModel.InputTokens != 10_000_000 {
+		t.Fatalf("StatsByModel input tokens = %d, want 10 retained records", byModel.InputTokens)
+	}
+
+	global := m.Stats().EstimatedCost
+	if global <= byModel.EstimatedCost {
+		t.Fatalf("global cumulative cost %v should exceed retained cost %v", global, byModel.EstimatedCost)
 	}
 }
 

@@ -119,7 +119,6 @@ const DefaultMaxRecords = 100000
 type Meter struct {
 	records    []Record           // 详细记录列表
 	pricing    map[string]Pricing // 模型定价表
-	modelCosts map[string]float64 // 按模型累计成本，避免记录裁剪后口径漂移
 	maxRecords int                // 最大记录数，0 表示无限制
 	mu         sync.RWMutex       // 保护 records 的读写锁
 
@@ -172,7 +171,6 @@ func NewWithOptions(pricing map[string]Pricing, maxRecords int) *Meter {
 	return &Meter{
 		records:    make([]Record, 0),
 		pricing:    p,
-		modelCosts: make(map[string]float64),
 		maxRecords: maxRecords,
 	}
 }
@@ -259,7 +257,6 @@ func (m *Meter) RecordWithDetails(model string, inputTokens, outputTokens int, l
 	if pricing, ok := m.pricing[model]; ok {
 		cost := float64(inputTokens)/1_000_000*pricing.InputPrice +
 			float64(outputTokens)/1_000_000*pricing.OutputPrice
-		m.modelCosts[model] += cost
 		m.addCost(cost)
 	}
 	m.mu.Unlock()
@@ -268,8 +265,8 @@ func (m *Meter) RecordWithDetails(model string, inputTokens, outputTokens int, l
 // Stats 返回所有请求的聚合统计信息
 // 包含请求数、Token 数、成本和延迟等指标
 //
-// 注意：成本和延迟的详细统计（MinLatency/MaxLatency）需要遍历 records，
-// 当记录被清理后，这些值只反映剩余记录的情况。
+// 请求数、Token 数与成本为生命周期累计值，不受记录清理影响；
+// MinLatency/MaxLatency 需要遍历 records，只反映剩余记录。
 // 如需精确的历史累计统计，请使用原子计数器相关字段。
 //
 // 线程安全
@@ -313,6 +310,9 @@ func (m *Meter) Stats() Stats {
 
 // StatsByModel 返回指定模型的统计信息
 // 只统计匹配模型名称的请求
+//
+// 所有字段都基于当前保留的 records，因此超过 MaxRecords 触发清理后，
+// Token/请求数/成本只反映剩余记录，与生命周期累计的 Stats 不同。
 func (m *Meter) StatsByModel(model string) Stats {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -325,6 +325,7 @@ func (m *Meter) statsByModelLocked(model string) Stats {
 	var stats Stats
 	var totalLatency time.Duration
 	var latencyCount int
+	pricing, priced := m.pricing[model]
 
 	for _, r := range m.records {
 		if r.Model != model {
@@ -339,6 +340,11 @@ func (m *Meter) statsByModelLocked(model string) Stats {
 		}
 		stats.InputTokens += int64(r.InputTokens)
 		stats.OutputTokens += int64(r.OutputTokens)
+		if priced {
+			// 成本与 Token 使用同一批保留记录计算，避免裁剪后口径不一致。
+			stats.EstimatedCost += float64(r.InputTokens)/1_000_000*pricing.InputPrice +
+				float64(r.OutputTokens)/1_000_000*pricing.OutputPrice
+		}
 
 		if r.Latency > 0 {
 			totalLatency += r.Latency
@@ -353,7 +359,6 @@ func (m *Meter) statsByModelLocked(model string) Stats {
 	}
 
 	stats.TotalTokens = stats.InputTokens + stats.OutputTokens
-	stats.EstimatedCost = m.modelCosts[model]
 
 	// 计算平均延迟
 	if latencyCount > 0 {
@@ -433,7 +438,6 @@ func (m *Meter) Clear() {
 	m.totalLatency.Store(0)
 	m.latencyCount.Store(0)
 	m.totalCost.Store(0)
-	m.modelCosts = make(map[string]float64)
 }
 
 // 注：totalCost 存的是 float64 bits；0.0 的 bits 恰为 0，故 Store(0) 即重置为 0.0。
