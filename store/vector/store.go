@@ -201,6 +201,11 @@ func (s *MemoryStore) Add(ctx context.Context, docs []Document) error {
 
 	now := time.Now()
 	for _, doc := range docs {
+		// 维度不一致的向量写入后无法参与相似度计算，必须显式拒绝，
+		// 避免检索静默返回空结果。dimension <= 0 视为未配置，保持零值兼容。
+		if s.dimension > 0 && len(doc.Embedding) != s.dimension {
+			return fmt.Errorf("vector: document %q embedding dimension %d, want %d", doc.ID, len(doc.Embedding), s.dimension)
+		}
 		doc.CreatedAt = now
 		doc.UpdatedAt = now
 		s.docs[doc.ID] = doc
@@ -213,6 +218,9 @@ func (s *MemoryStore) Add(ctx context.Context, docs []Document) error {
 func (s *MemoryStore) Search(ctx context.Context, query []float32, k int, opts ...SearchOption) ([]Document, error) {
 	if k <= 0 {
 		return nil, fmt.Errorf("vector: k must be positive")
+	}
+	if s.dimension > 0 && len(query) != s.dimension {
+		return nil, fmt.Errorf("vector: query dimension %d, want %d", len(query), s.dimension)
 	}
 	// 检查 context 是否已取消
 	if err := ctx.Err(); err != nil {

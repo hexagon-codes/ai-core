@@ -356,7 +356,7 @@ func (s *Store) Search(ctx context.Context, query []float32, k int, opts ...vect
 	}
 
 	// 添加过滤条件
-	if cfg.Filter != nil && len(cfg.Filter) > 0 {
+	if len(cfg.Filter) > 0 {
 		req["filter"] = s.buildFilter(cfg.Filter)
 	}
 
