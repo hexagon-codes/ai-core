@@ -30,6 +30,8 @@ ai-core 是面向任意 Go 应用与 Agent 框架的开源 AI 基础能力库。
 - `media/video.Service.Submit` 返回的不透明任务引用必须原样传入 `Poll`，调用方不得依赖其内部编码。`Poll` 继续接受可唯一解析的历史 `{provider}::{taskID}` 引用；存在歧义的旧引用会返回错误。提交成功后首次轮询失败时，`SubmitAndWait` 返回状态仍包含可恢复的 `TaskID`。
 - `media/voice.ChainedTTS` 在 context 标记 `transport.OperationSafetyNonIdempotent` 时，仅对明确未被接纳的合成失败执行 Provider 回退；结果未知时停止，避免重复执行可能已接纳的请求。取消和超时也不会触发回退。`SynthesizeResult.Provider` 与 `IsDefinitiveSynthesisFailure` 为新增的兼容性 API。
 
+- `schema.Of` 对 `json:",string"` 整数字段保留 Go 整数语法：小数和指数形式不作为整数接受；无符号整数字符串不接受负号。该约束同样作用于组合及引用 Schema，显式 `pattern` 继续生效；整数指针以 string/null 组合表示，描述、默认值和字段约束保留在属性层，显式 `enum` 未包含 null 时仍拒绝 null。非空值继续受整数语法和数值标签约束。Go 允许的整数字符串前导零不会被误当成非法裸 JSON 数字。
+
 ## 2026-11-04 Schema 与流修复
 
 - `json:",string"` 数值字段带 `min`/`max` 时，`Schema.Of` 生成显式 `x-hexagon-string-number` 标记；Validator 只对带标记的字符串执行数值边界检查。普通 `type:string` 上的 `minimum`/`maximum` 保持 JSON Schema 注解语义，不再被误当字符串内数值约束。

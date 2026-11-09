@@ -539,6 +539,19 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 		if pattern := field.Tag.Get("pattern"); pattern != "" {
 			propSchema.Pattern = pattern
 		}
+		if stringEncoded && originalType == "integer" {
+			// 整数字符串仍遵守 Go 的整数语法，不能因 wire 类型为 string 接受小数或指数。
+			integerPattern := "^-?[0-9]+$"
+			switch fieldType.Kind() {
+			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
+				integerPattern = "^[0-9]+$"
+			}
+			if propSchema.Pattern == "" {
+				propSchema.Pattern = integerPattern
+			} else {
+				propSchema.AllOf = append(propSchema.AllOf, &Schema{Pattern: integerPattern})
+			}
+		}
 
 		// 解析 min/max tag。按原始 JSON 类型区分长度与数值约束；
 		// json:",string" 只改变 wire 表示，不能把数值字段的 min/max 变成字符串长度。
@@ -585,6 +598,11 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			propSchema.AdditionalKeywords[numericStringKeyword] = true
 		}
 
+		if stringEncoded && originalType == "integer" && field.Type.Kind() == reflect.Pointer {
+			// nil 指针编码为 null；整数语法和范围只约束非空分支。
+			propSchema.Type = ""
+			propSchema.AnyOf = []*Schema{{Type: "string"}, {Type: "null"}}
+		}
 		if embeddedProperties[name] {
 			removeRequired(name)
 		}

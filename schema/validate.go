@@ -497,6 +497,13 @@ func numericBound(value any) (*big.Rat, bool) {
 }
 
 func parseNumberString(value string) (*big.Rat, error) {
+	// encoding/json 的整数字符串允许前导零，不能直接按裸 JSON 数字拒绝。
+	digits := strings.TrimPrefix(value, "-")
+	if digits != "" && strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
+		if integer, ok := new(big.Int).SetString(value, 10); ok {
+			return new(big.Rat).SetInt(integer), nil
+		}
+	}
 	decoder := json.NewDecoder(strings.NewReader(value))
 	decoder.UseNumber()
 	var parsed any
