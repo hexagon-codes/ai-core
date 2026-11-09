@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"reflect"
 	"strings"
 	"sync"
 	"time"
@@ -342,8 +343,17 @@ func (m *SummaryMemory) doSummarize(ctx context.Context) error {
 		return nil
 	}
 
-	// 只删除实际参与摘要的条目；摘要期间 Delete/Clear 或新增的条目不受影响。
+	// 只删除仍是快照版本的条目；摘要期间用同 ID 保存的新版本必须保留，
+	// 否则更新后的内容会被按 ID 无条件删除。
+	// 此处持有 m.mu，与 Save/Delete/Clear 串行，检查与删除之间不会插入更新。
 	for _, entry := range toSummarize {
+		current, err := m.buffer.Get(ctx, entry.ID)
+		if err != nil {
+			continue // 摘要期间已被删除
+		}
+		if !reflect.DeepEqual(*current, entry) {
+			continue // 摘要期间已更新，保留最新版本
+		}
 		_ = m.buffer.Delete(ctx, entry.ID)
 	}
 	m.summary = newSummary

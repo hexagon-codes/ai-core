@@ -105,6 +105,54 @@ func TestSummaryMemoryDeleteDuringSummarizeIsNotResurrected(t *testing.T) {
 	}
 }
 
+func TestSummaryMemorySameIDUpdateDuringSummarizeIsPreserved(t *testing.T) {
+	t.Parallel()
+
+	summarizer := &blockingSummarizer{
+		started: make(chan struct{}),
+		release: make(chan struct{}),
+	}
+	mem := NewSummaryMemory(summarizer, WithMaxEntries(2), WithKeepRecent(1))
+	ctx := context.Background()
+	for _, id := range []string{"one", "two"} {
+		if err := mem.Save(ctx, Entry{ID: id, Role: "user", Content: id}); err != nil {
+			t.Fatalf("Save(%s) error = %v", id, err)
+		}
+	}
+
+	saveDone := make(chan error, 1)
+	go func() {
+		saveDone <- mem.Save(ctx, Entry{ID: "three", Role: "user", Content: "three"})
+	}()
+	select {
+	case <-summarizer.started:
+	case <-time.After(2 * time.Second):
+		t.Fatal("summarizer did not start")
+	}
+	// 摘要快照包含 two；摘要期间用同 ID 写入新版本，提交阶段不能把它删掉。
+	if err := mem.Save(ctx, Entry{ID: "two", Role: "user", Content: "updated"}); err != nil {
+		t.Fatalf("Save(two updated) error = %v", err)
+	}
+	close(summarizer.release)
+	if err := <-saveDone; err != nil {
+		t.Fatalf("Save(three) error = %v", err)
+	}
+
+	updated, err := mem.Get(ctx, "two")
+	if err != nil {
+		t.Fatalf("updated entry was deleted by summarize: %v", err)
+	}
+	if updated.Content != "updated" {
+		t.Fatalf("entry content = %q, want updated", updated.Content)
+	}
+	if _, err := mem.Get(ctx, "one"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("unchanged summarized entry should be removed, got %v", err)
+	}
+	if mem.GetSummary() == "" {
+		t.Fatal("summary was not committed")
+	}
+}
+
 type reentrantSummarizer struct {
 	memory *SummaryMemory
 	err    error
