@@ -2,14 +2,64 @@ package openai
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
 	"testing"
 
 	"github.com/hexagon-codes/ai-core/llm"
 )
+
+func TestNativeResponsesComputerToolRejectionCode(t *testing.T) {
+	for _, test := range []struct {
+		name, message, upstreamCode, wantCode string
+		tools                                 []ComputerTool
+	}{
+		{name: "declared computer rejected", message: "Unsupported tool type: computer", tools: []ComputerTool{{Type: "computer"}}, wantCode: "unsupported_tool"},
+		{name: "ordinary bad request", message: "Invalid input", tools: []ComputerTool{{Type: "computer"}}},
+		{name: "computer not declared", message: "Unsupported tool type: computer"},
+		{name: "upstream code preserved", message: "Unsupported tool type: computer", upstreamCode: "provider_specific_code", tools: []ComputerTool{{Type: "computer"}}, wantCode: "provider_specific_code"},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			var calls atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+				calls.Add(1)
+				w.Header().Set("Content-Type", "application/json")
+				w.Header().Set("X-Request-Id", "native-request-known")
+				w.WriteHeader(http.StatusBadRequest)
+				errorBody := map[string]string{"type": "invalid_request_error", "message": test.message}
+				if test.upstreamCode != "" {
+					errorBody["code"] = test.upstreamCode
+				}
+				if err := json.NewEncoder(w).Encode(map[string]any{"error": errorBody}); err != nil {
+					t.Error(err)
+				}
+			}))
+			defer server.Close()
+			_, err := New("fixture", WithBaseURL(server.URL)).CreateResponse(t.Context(), ResponsesRequest{
+				Model: "test-model", Tools: test.tools,
+				Input: []ResponseInputItem{{Role: "user", Content: []ResponseInputContent{{Type: "input_text", Text: "synthetic request"}}}},
+			})
+			var typed *ResponsesError
+			if !errors.As(err, &typed) || typed.Code != test.wantCode {
+				t.Fatalf("typed error=%+v, want code %q", typed, test.wantCode)
+			}
+			if typed.StatusCode != http.StatusBadRequest || typed.RequestID != "native-request-known" || !typed.Dispatched || typed.OutcomeUnknown {
+				t.Fatalf("known rejection receipt changed: %+v", typed)
+			}
+			if strings.Contains(err.Error(), test.message) {
+				t.Fatal("raw upstream message escaped the public error")
+			}
+			if calls.Load() != 1 {
+				t.Fatalf("physical requests=%d, want exactly one original request", calls.Load())
+			}
+		})
+	}
+}
 
 func TestNativeResponsesErrorsRetainHTTPClassification(t *testing.T) {
 	for _, test := range []struct {

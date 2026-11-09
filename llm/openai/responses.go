@@ -333,6 +333,15 @@ func (p *Provider) CreateResponse(ctx context.Context, req ResponsesRequest) (*R
 		var apiErr *openaisdk.Error
 		if errors.As(err, &apiErr) {
 			code = apiErr.Code
+			// 仅归一已声明 computer 工具的明确拒绝；普通参数错误和上游原码保持不变。
+			if code == "" && statusCode == http.StatusBadRequest && apiErr.Type == "invalid_request_error" && strings.EqualFold(strings.TrimSpace(apiErr.Message), "Unsupported tool type: computer") {
+				for _, tool := range req.Tools {
+					if tool.Type == "computer" {
+						code = "unsupported_tool"
+						break
+					}
+				}
+			}
 		}
 		return nil, &ResponsesError{
 			StatusCode: statusCode, RequestID: requestID, Code: code, Dispatched: dispatched,
