@@ -117,7 +117,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	return p.parseResponse(&result, req.Model), nil
+	parsed := p.parseResponse(&result, req.Model)
+	parsed.RequestID = llm.RequestIDFromHeader(resp.Header)
+	return parsed, nil
 }
 
 // Stream 执行流式补全请求
@@ -138,6 +140,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 
 	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.GeminiFormat)
 	stream.SetParser(streamx.NewTerminalValidatingParser(&streamx.GeminiParser{}))
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
 	return stream, nil
 }
 
@@ -545,6 +548,7 @@ func (p *Provider) parseResponse(resp *geminiResponse, model string) *llm.Comple
 			TotalTokens:      resp.UsageMetadata.TotalTokenCount,
 		},
 	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
 
 	if len(resp.Candidates) > 0 {
 		candidate := resp.Candidates[0]

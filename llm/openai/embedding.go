@@ -81,7 +81,7 @@ func (p *Provider) EmbedWithModel(ctx context.Context, model string, texts []str
 		return nil, fmt.Errorf("序列化 embedding 请求失败: %w", err)
 	}
 
-	result, err := doJSONWithDecodeRetry[embeddingResponse](ctx, p, "embedding", "/embeddings", body)
+	result, _, err := doJSONWithDecodeRetry[embeddingResponse](ctx, p, "embedding", "/embeddings", body)
 	if err != nil {
 		var decodeErr *responseDecodeError
 		if errors.As(err, &decodeErr) {

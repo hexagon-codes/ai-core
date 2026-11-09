@@ -516,6 +516,7 @@ func TestComplete_Success(t *testing.T) {
 		if r.URL.Path != "/chat/completions" {
 			t.Errorf("路径错误: %s", r.URL.Path)
 		}
+		w.Header().Set("x-request-id", "req-openai-1")
 		_, _ = w.Write([]byte(`{"id":"id_1","model":"gpt-x","created":123,
 			"choices":[{"index":0,"message":{"role":"assistant","content":"hello"},
 			"finish_reason":"stop"}],
@@ -532,6 +533,12 @@ func TestComplete_Success(t *testing.T) {
 	if resp.Content != "hello" || resp.Usage.TotalTokens != 15 ||
 		resp.FinishReason != "stop" || resp.Model != "gpt-x" || resp.Created != 123 {
 		t.Fatalf("响应解析错误: %+v", resp)
+	}
+	if resp.RequestID != "req-openai-1" {
+		t.Fatalf("RequestID = %q, want req-openai-1", resp.RequestID)
+	}
+	if resp.UsageReceipt == nil || resp.UsageReceipt.TotalTokens != 15 {
+		t.Fatalf("UsageReceipt = %+v, want reported 15 tokens", resp.UsageReceipt)
 	}
 }
 

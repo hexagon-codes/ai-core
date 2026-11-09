@@ -154,6 +154,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	}
 
 	parsed := p.parseResponse(&result, req.Model)
+	parsed.RequestID = llm.RequestIDFromHeader(resp.Header)
 	if explicitReasoning {
 		receipt := reasoningReceipt.WithEvidence(true, anthropicResponseHasReasoning(&result), 0)
 		parsed.ReasoningReceipt = &receipt
@@ -196,7 +197,9 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		parser.receipt = reasoningReceipt.WithEvidence(true, false, 0)
 		llm.PublishReasoningReceipt(req.Metadata, parser.receipt)
 	}
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.ClaudeFormat).SetParser(parser), nil
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.ClaudeFormat).SetParser(parser)
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
+	return stream, nil
 }
 
 // Models 返回可用模型列表
@@ -776,6 +779,7 @@ func (p *Provider) parseResponse(resp *anthropicResponse, model string) *llm.Com
 			CacheReadTokens:     resp.Usage.CacheReadInputTokens,
 		},
 	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
 
 	// 处理内容
 	for _, content := range resp.Content {

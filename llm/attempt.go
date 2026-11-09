@@ -167,10 +167,7 @@ func (t *attemptRoundTripper) RoundTrip(request *http.Request) (*http.Response, 
 	if response.StatusCode < 200 || response.StatusCode >= 300 {
 		tracker.receipt.Error = fmt.Errorf("upstream HTTP status %d", response.StatusCode)
 	}
-	tracker.receipt.RequestID = response.Header.Get("x-request-id")
-	if tracker.receipt.RequestID == "" {
-		tracker.receipt.RequestID = response.Header.Get("request-id")
-	}
+	tracker.receipt.RequestID = RequestIDFromHeader(response.Header)
 	tracker.receipt.Protocol = "json"
 	if strings.Contains(response.Header.Get("Content-Type"), "event-stream") {
 		tracker.receipt.Protocol = "sse"
@@ -480,4 +477,15 @@ func (l *AttemptLedger) Summary() AttemptUsageSummary {
 		}
 	}
 	return summary
+}
+
+// RequestIDFromHeader 从上游响应头提取请求追踪 ID。
+// 兼容 OpenAI/Anthropic 常用的 x-request-id 与 request-id 命名。
+func RequestIDFromHeader(header http.Header) string {
+	for _, key := range []string{"x-request-id", "request-id"} {
+		if value := header.Get(key); value != "" {
+			return value
+		}
+	}
+	return ""
 }

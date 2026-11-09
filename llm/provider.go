@@ -214,7 +214,8 @@ type ResponseFormatJSONSchema struct {
 type CompletionResponse struct {
 	// ID 响应的唯一标识符
 	ID string `json:"id"`
-	// RequestID 是实际 HTTP x-request-id，与响应对象 ID 分开保存。
+	// RequestID 是实际 HTTP 请求追踪 ID（上游返回 x-request-id/request-id 时填充），
+	// 与响应对象 ID 分开保存。
 	RequestID string `json:"-"`
 
 	// Model 使用的模型名称
@@ -242,6 +243,16 @@ type CompletionResponse struct {
 	ProviderContinuation *ProviderContinuation `json:"-"`
 	// UsageReceipt 保留上游实际报告的用量；nil 表示未提供，不能解释为零消耗。
 	UsageReceipt *Usage `json:"-"`
+}
+
+// UsageReceiptFromUsage 在任一用量字段非零时返回防御性副本，供 Provider
+// 标记“上游确实报告了用量”。全零值无法区分“未报告”和“报告零”，此时返回 nil。
+func UsageReceiptFromUsage(usage Usage) *Usage {
+	if usage == (Usage{}) {
+		return nil
+	}
+	receipt := usage
+	return &receipt
 }
 
 // HasToolCalls 检查响应是否包含工具调用

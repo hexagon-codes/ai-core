@@ -127,7 +127,9 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	return p.parseResponse(&result), nil
+	parsed := p.parseResponse(&result)
+	parsed.RequestID = llm.RequestIDFromHeader(resp.Header)
+	return parsed, nil
 }
 
 // Stream 执行流式补全请求
@@ -156,6 +158,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 	// 通义千问使用 OpenAI 兼容格式；补齐终态校验，避免截断流被当成成功。
 	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat)
 	stream.SetParser(streamx.NewTerminalValidatingParser(&streamx.OpenAIParser{}))
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
 	return stream, nil
 }
 
@@ -347,6 +350,7 @@ func (p *Provider) parseResponse(resp *qwenResponse) *llm.CompletionResponse {
 			TotalTokens:      resp.Usage.TotalTokens,
 		},
 	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
 
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]

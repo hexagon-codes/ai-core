@@ -214,6 +214,7 @@ func TestComplete_Success(t *testing.T) {
 		if r.Header.Get("x-api-key") != "k" {
 			t.Errorf("缺 api key")
 		}
+		w.Header().Set("request-id", "req-anthropic-1")
 		_, _ = w.Write([]byte(`{"id":"msg_1","model":"claude-x","stop_reason":"end_turn",
 			"content":[{"type":"text","text":"hello"}],
 			"usage":{"input_tokens":10,"output_tokens":5}}`))
@@ -228,6 +229,12 @@ func TestComplete_Success(t *testing.T) {
 	}
 	if resp.Content != "hello" || resp.Usage.TotalTokens != 15 || resp.FinishReason != "end_turn" {
 		t.Fatalf("响应解析错误: %+v", resp)
+	}
+	if resp.RequestID != "req-anthropic-1" {
+		t.Fatalf("RequestID = %q, want req-anthropic-1", resp.RequestID)
+	}
+	if resp.UsageReceipt == nil || resp.UsageReceipt.TotalTokens != 15 {
+		t.Fatalf("UsageReceipt = %+v, want reported 15 tokens", resp.UsageReceipt)
 	}
 }
 

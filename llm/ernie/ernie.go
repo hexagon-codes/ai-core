@@ -118,7 +118,12 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, fmt.Errorf("ernie response exceeds %d bytes", ernieMaxResponseBytes)
 	}
 
-	return p.parseResponse(data)
+	parsed, err := p.parseResponse(data)
+	if err != nil {
+		return nil, err
+	}
+	parsed.RequestID = llm.RequestIDFromHeader(resp.Header)
+	return parsed, nil
 }
 
 // Stream 流式补全
@@ -143,6 +148,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 
 	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat)
 	stream.SetParser(streamx.NewTerminalValidatingParser(&ernieStreamParser{}))
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
 	return stream, nil
 }
 
@@ -302,7 +308,7 @@ func (p *Provider) parseResponse(data []byte) (*llm.CompletionResponse, error) {
 		return nil, fmt.Errorf("ernie error %d: %s", er.ErrorCode, er.ErrorMsg)
 	}
 
-	return &llm.CompletionResponse{
+	result := &llm.CompletionResponse{
 		ID:      er.ID,
 		Content: er.Result,
 		Usage: llm.Usage{
@@ -311,7 +317,9 @@ func (p *Provider) parseResponse(data []byte) (*llm.CompletionResponse, error) {
 			TotalTokens:      er.Usage.TotalTokens,
 		},
 		FinishReason: "stop",
-	}, nil
+	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
+	return result, nil
 }
 
 // ernieStreamParser 解析 ERNIE SSE 流

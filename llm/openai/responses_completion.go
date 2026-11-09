@@ -119,7 +119,7 @@ func (p *Provider) buildCompletionResponsesBody(ctx context.Context, req llm.Com
 		return nil, plan, explicit, err
 	}
 	if len(req.Stop) > 0 {
-		return nil, plan, explicit, errors.New("Responses does not support stop sequences")
+		return nil, plan, explicit, errors.New("responses does not support stop sequences")
 	}
 	input, err := completionResponsesInput(req.Messages, p.ResponsesContinuationSource(ctx, req.Model), req.Model)
 	if err != nil {
@@ -168,7 +168,7 @@ func (p *Provider) buildCompletionResponsesBody(ctx context.Context, req llm.Com
 		if effort, exists := plan.Wire[string(llm.ReasoningDialectEffort)]; exists {
 			payload["reasoning"] = map[string]any{"effort": effort}
 		} else if len(plan.Wire) > 0 {
-			return nil, plan, explicit, errors.New("Responses requires reasoning effort control")
+			return nil, plan, explicit, errors.New("responses requires reasoning effort control")
 		}
 	} else if effort, ok := trustedOpenAIReasoningEffort(req); ok {
 		payload["reasoning"] = map[string]any{"effort": effort}
@@ -179,7 +179,7 @@ func (p *Provider) buildCompletionResponsesBody(ctx context.Context, req llm.Com
 		case "text", "json_object":
 		case "json_schema":
 			if format.JSONSchema == nil {
-				return nil, plan, explicit, errors.New("Responses JSON schema format requires a schema")
+				return nil, plan, explicit, errors.New("responses JSON schema format requires a schema")
 			}
 			wire["name"], wire["schema"], wire["strict"] = format.JSONSchema.Name, format.JSONSchema.Schema, format.JSONSchema.Strict
 			if format.JSONSchema.Description != "" {
@@ -253,7 +253,7 @@ func completionResponsesInput(messages []llm.Message, source, model string) ([]j
 					}
 					if call.Type == "function_call" {
 						if call.CallID == "" || seenCalls[call.CallID] {
-							return nil, errors.New("Responses continuation has a missing or duplicate function call_id")
+							return nil, errors.New("responses continuation has a missing or duplicate function call_id")
 						}
 						seenCalls[call.CallID] = true
 						pending[call.CallID] = true
@@ -303,7 +303,7 @@ func completionResponsesInput(messages []llm.Message, source, model string) ([]j
 		}
 	}
 	if len(pending) > 0 {
-		return nil, errors.New("Responses continuation is missing a function result")
+		return nil, errors.New("responses continuation is missing a function result")
 	}
 	return input, nil
 }
@@ -425,7 +425,7 @@ func (p *Provider) completeResponses(ctx context.Context, req llm.CompletionRequ
 		return nil, call.failure("request_failed", err)
 	}
 	if result == nil {
-		return nil, call.failure("missing_response", errors.New("Responses returned no response"))
+		return nil, call.failure("missing_response", errors.New("responses returned no response"))
 	}
 	parsed, err := parseResponsesResponse([]byte(result.RawJSON()))
 	if err != nil {

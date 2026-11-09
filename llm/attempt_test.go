@@ -217,3 +217,23 @@ func TestHTTPAttemptStreamCancellationRetainsReceiptAndFinishesOnce(t *testing.T
 		})
 	}
 }
+
+func TestRequestIDFromHeader(t *testing.T) {
+	t.Parallel()
+
+	cases := []struct {
+		name   string
+		header http.Header
+		want   string
+	}{
+		{name: "x-request-id", header: http.Header{"X-Request-Id": []string{"req-1"}}, want: "req-1"},
+		{name: "request-id", header: http.Header{"Request-Id": []string{"req-2"}}, want: "req-2"},
+		{name: "precedence", header: http.Header{"X-Request-Id": []string{"first"}, "Request-Id": []string{"second"}}, want: "first"},
+		{name: "missing", header: http.Header{}, want: ""},
+	}
+	for _, c := range cases {
+		if got := llm.RequestIDFromHeader(c.header); got != c.want {
+			t.Errorf("%s: RequestIDFromHeader() = %q, want %q", c.name, got, c.want)
+		}
+	}
+}

@@ -145,7 +145,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 		return nil, err
 	}
 
-	result, err := doJSONWithDecodeRetry[openAIResponse](ctx, p, "complete", "/chat/completions", body)
+	result, requestID, err := doJSONWithDecodeRetry[openAIResponse](ctx, p, "complete", "/chat/completions", body)
 	if err != nil {
 		var decodeErr *responseDecodeError
 		if errors.As(err, &decodeErr) {
@@ -161,6 +161,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	}
 
 	parsed := p.parseResponse(&result)
+	parsed.RequestID = requestID
 	if result.Error != nil {
 		return nil, fmt.Errorf("openai error: %s", result.Error.Message)
 	}
@@ -203,6 +204,7 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 	}
 
 	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.OpenAIFormat)
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
 	var parser streamx.ChunkParser = &streamx.OpenAIParser{}
 	if explicitReasoning {
 		receipt := reasoningPlan.Receipt.WithEvidence(true, false, 0)
@@ -338,7 +340,7 @@ func (e *responseDecodeError) Unwrap() error {
 	return e.Err
 }
 
-func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path string, body []byte) (T, error) {
+func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path string, body []byte) (T, string, error) {
 	var zero T
 	policy := transport.DefaultRetryPolicy()
 	if transport.OperationSafetyFromContext(ctx) == transport.OperationSafetyNonIdempotent {
@@ -347,8 +349,9 @@ func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path
 	for attempt := 1; ; attempt++ {
 		resp, err := p.doRequest(ctx, action, path, body)
 		if err != nil {
-			return zero, err
+			return zero, "", err
 		}
+		requestID := llm.RequestIDFromHeader(resp.Header)
 
 		var result T
 		decodeErr := json.NewDecoder(resp.Body).Decode(&result)
@@ -356,13 +359,13 @@ func doJSONWithDecodeRetry[T any](ctx context.Context, p *Provider, action, path
 			decodeErr = closeErr
 		}
 		if decodeErr == nil {
-			return result, nil
+			return result, requestID, nil
 		}
 		if attempt >= policy.MaxAttempts || !isRetryableResponseDecodeError(ctx, decodeErr) {
-			return zero, &responseDecodeError{Err: decodeErr}
+			return zero, "", &responseDecodeError{Err: decodeErr}
 		}
 		if err := waitForDecodeRetry(ctx, decodeRetryDelay(policy, attempt)); err != nil {
-			return zero, err
+			return zero, "", err
 		}
 	}
 }
@@ -732,6 +735,7 @@ func (p *Provider) parseResponse(resp *openAIResponse) *llm.CompletionResponse {
 			CacheReadTokens: resp.Usage.PromptTokensDetails.CachedTokens,
 		},
 	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
 
 	if len(resp.Choices) > 0 {
 		choice := resp.Choices[0]

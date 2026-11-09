@@ -281,7 +281,7 @@ func (p *Provider) CreateResponse(ctx context.Context, req ResponsesRequest) (*R
 		ctx = context.Background()
 	}
 	if p == nil || strings.TrimSpace(req.Model) == "" {
-		return nil, &ResponsesError{Code: "missing_model", cause: errors.New("Responses requires an explicit model")}
+		return nil, &ResponsesError{Code: "missing_model", cause: errors.New("responses requires an explicit model")}
 	}
 	if err := ctx.Err(); err != nil {
 		return nil, &ResponsesError{Code: "cancelled_before_dispatch", cause: err}
@@ -368,7 +368,7 @@ func responseReceipt(resp *http.Response) (int, string) {
 	if resp == nil {
 		return 0, ""
 	}
-	return resp.StatusCode, resp.Header.Get("x-request-id")
+	return resp.StatusCode, llm.RequestIDFromHeader(resp.Header)
 }
 
 func parseResponsesResponse(raw []byte) (*ResponsesResponse, error) {
@@ -392,7 +392,7 @@ func parseResponsesResponse(raw []byte) (*ResponsesResponse, error) {
 		Output:            make([]ResponseOutputItem, 0, len(envelope.Output)),
 	}
 	if envelope.ID == "" || envelope.Model == "" || envelope.Status == "" || envelope.Output == nil {
-		return parsed, errors.New("Responses response is missing required fields")
+		return parsed, errors.New("responses response is missing required fields")
 	}
 	var err error
 	parsed.Usage, err = parseResponseUsage(envelope.Usage)
@@ -406,7 +406,7 @@ func parseResponsesResponse(raw []byte) (*ResponsesResponse, error) {
 		}
 		item.RawJSON = rawItem
 		if item.Type == "" {
-			return parsed, errors.New("Responses output item is missing its type")
+			return parsed, errors.New("responses output item is missing its type")
 		}
 		if item.Type == "computer_call" && (item.CallID == "" || len(item.Actions) == 0 && item.Action == nil) {
 			return parsed, errors.New("computer call is missing its identity or actions")

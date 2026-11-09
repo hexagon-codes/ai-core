@@ -176,10 +176,10 @@ func (p *completionResponsesParser) Parse(raw []byte) (*streamx.Chunk, error) {
 		if call.Type == "function_call" {
 			fragment := p.functionFragment(event.OutputIndex, call.ID)
 			if fragment == nil {
-				return nil, p.fail("invalid_function_call", errors.New("Responses function event is missing its item identity"))
+				return nil, p.fail("invalid_function_call", errors.New("responses function event is missing its item identity"))
 			}
 			if fragment.callID != "" && call.CallID != "" && fragment.callID != call.CallID {
-				return nil, p.fail("invalid_function_call", errors.New("Responses changed a function call identity"))
+				return nil, p.fail("invalid_function_call", errors.New("responses changed a function call identity"))
 			}
 			fragment.itemID = call.ID
 			if call.CallID != "" {
@@ -190,7 +190,7 @@ func (p *completionResponsesParser) Parse(raw []byte) (*streamx.Chunk, error) {
 			}
 			if event.Type == "response.output_item.done" {
 				if fragment.done && fragment.arguments != call.Arguments {
-					return nil, p.fail("invalid_function_call", errors.New("Responses changed completed function arguments"))
+					return nil, p.fail("invalid_function_call", errors.New("responses changed completed function arguments"))
 				}
 				fragment.arguments, fragment.done = call.Arguments, true
 			} else if call.Arguments != "" {
@@ -200,16 +200,16 @@ func (p *completionResponsesParser) Parse(raw []byte) (*streamx.Chunk, error) {
 	case "response.function_call_arguments.delta":
 		fragment := p.functionFragment(event.OutputIndex, event.ItemID)
 		if fragment == nil {
-			return nil, p.fail("invalid_function_call", errors.New("Responses function delta is missing its item identity"))
+			return nil, p.fail("invalid_function_call", errors.New("responses function delta is missing its item identity"))
 		}
 		if fragment.done {
-			return nil, p.fail("invalid_function_call", errors.New("Responses emitted function arguments after completion"))
+			return nil, p.fail("invalid_function_call", errors.New("responses emitted function arguments after completion"))
 		}
 		fragment.arguments += event.Delta
 	case "response.function_call_arguments.done":
 		fragment := p.functionFragment(event.OutputIndex, event.ItemID)
 		if fragment == nil || fragment.done && fragment.arguments != event.Arguments {
-			return nil, p.fail("invalid_function_call", errors.New("Responses changed or omitted completed function arguments"))
+			return nil, p.fail("invalid_function_call", errors.New("responses changed or omitted completed function arguments"))
 		}
 		fragment.arguments, fragment.done = event.Arguments, true
 	case "response.completed":
@@ -236,7 +236,7 @@ func (p *completionResponsesParser) Parse(raw []byte) (*streamx.Chunk, error) {
 		chunk.ToolCalls = completion.ToolCalls
 		chunk.ProviderContinuation = completion.ProviderContinuation
 		if !strings.HasPrefix(completion.Content, p.emitted.String()) {
-			return nil, p.fail("invalid_response", errors.New("Responses final text differs from the streamed content"))
+			return nil, p.fail("invalid_response", errors.New("responses final text differs from the streamed content"))
 		}
 		chunk.Content = completion.Content[p.emitted.Len():]
 		if completion.UsageReceipt != nil {
@@ -300,7 +300,7 @@ func (p *completionResponsesParser) validateFunctions(response *ResponsesRespons
 		}
 		if fragment.callID != "" && fragment.callID != call.CallID || fragment.name != "" && fragment.name != call.Name ||
 			fragment.done && fragment.arguments != call.Arguments || !fragment.done && !strings.HasPrefix(call.Arguments, fragment.arguments) {
-			return errors.New("Responses final function call differs from its streamed identity or arguments")
+			return errors.New("responses final function call differs from its streamed identity or arguments")
 		}
 	}
 	return nil
@@ -337,6 +337,7 @@ func (p *Provider) streamResponses(ctx context.Context, req llm.CompletionReques
 	parser := &completionResponsesParser{provider: p, ctx: ctx, request: req, call: call, plan: plan, explicit: explicit,
 		functions: make(map[int]*responseFunctionFragments), itemIndex: make(map[string]int)}
 	stream := streamx.NewStreamWithContext(ctx, reader, streamx.CustomFormat).SetParser(parser)
+	stream.SetRequestID(call.requestID)
 	if explicit {
 		receipt := plan.Receipt.WithEvidence(true, false, 0)
 		llm.PublishReasoningReceipt(req.Metadata, receipt)

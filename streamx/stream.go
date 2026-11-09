@@ -494,6 +494,21 @@ func (s *Stream) Err() error {
 	return s.streamErr
 }
 
+// SetRequestID 设置本次流对应的实际 HTTP 请求身份。
+// Provider 应在返回 Stream 前调用，将响应头中的请求 ID 写入最终 Result；
+// 流启动后调用也安全，但不应覆盖已经聚合的终态结果。
+func (s *Stream) SetRequestID(requestID string) *Stream {
+	if s == nil {
+		return s
+	}
+	s.mu.Lock()
+	if s.result != nil {
+		s.result.RequestID = requestID
+	}
+	s.mu.Unlock()
+	return s
+}
+
 // Result 阻塞等待并返回完整结果
 // 等待流处理完成后返回聚合的 Result
 // 注意：必须先调用 Start() 或 Chunks() 启动处理
