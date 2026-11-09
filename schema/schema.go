@@ -540,8 +540,8 @@ func (g *typeGenerator) fromStruct(t reflect.Type) *Schema {
 			propSchema.Pattern = pattern
 		}
 		if stringEncoded && originalType == "integer" {
-			// 整数字符串仍遵守 Go 的整数语法，不能因 wire 类型为 string 接受小数或指数。
-			integerPattern := "^[+-]?[0-9]+$"
+			// 整数字符串遵守最低 Go 版本的解码语法，不能因 wire 类型为 string 接受小数或指数。
+			integerPattern := "^-?[0-9]+$"
 			switch fieldType.Kind() {
 			case reflect.Uint, reflect.Uint8, reflect.Uint16, reflect.Uint32, reflect.Uint64, reflect.Uintptr:
 				integerPattern = "^[0-9]+$"

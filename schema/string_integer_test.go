@@ -22,7 +22,7 @@ func TestStringEncodedIntegerSyntaxAcrossSchemaForms(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, text := range []string{"15", "-15", "015", "-015", "-0", "15.5", "1.5e1", "+15", " 15", "15 "} {
+			for _, text := range []string{"15", "-15", "015", "-015", "-0", "15.5", "1.5e1", " 15", "15 "} {
 				raw, err := json.Marshal(map[string]string{"n": text})
 				if err != nil {
 					t.Fatal(err)
@@ -33,6 +33,9 @@ func TestStringEncodedIntegerSyntaxAcrossSchemaForms(t *testing.T) {
 				if (validateErr == nil) != (decodeErr == nil) {
 					t.Errorf("value %q: validation = %v, Go decoding = %v", text, validateErr, decodeErr)
 				}
+			}
+			if err := validator.ValidateJSON([]byte(`{"n":"+15"}`)); err == nil {
+				t.Error("leading plus is outside the minimum Go JSON string-number syntax")
 			}
 		})
 	}

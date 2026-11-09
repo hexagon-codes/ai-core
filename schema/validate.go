@@ -158,14 +158,18 @@ func numericBound(value any) (*big.Rat, bool) {
 }
 
 func parseNumberString(value string) (*big.Rat, error) {
-	// 显式十进制保留前导零和符号，避免大数解析器按八进制解释整数。
-	digits := strings.TrimPrefix(strings.TrimPrefix(value, "-"), "+")
+	// 模块最低 Go 版本的 encoding/json 不接受数值字符串前导加号。
+	if strings.HasPrefix(value, "+") {
+		return nil, fmt.Errorf("string-encoded number %q has an invalid leading sign", value)
+	}
+	// 显式十进制保留前导零，避免大数解析器按八进制解释整数。
+	digits := strings.TrimPrefix(value, "-")
 	if digits != "" && strings.IndexFunc(digits, func(r rune) bool { return r < '0' || r > '9' }) < 0 {
 		if integer, ok := new(big.Int).SetString(value, 10); ok {
 			return new(big.Rat).SetInt(integer), nil
 		}
 	}
-	// Go 浮点字符串允许前导加号和零；范围比较仍用原字面量，不取 float64 近似。
+	// 范围比较保留原字面量精度，不取 float64 近似。
 	if _, err := strconv.ParseFloat(value, 64); err != nil && !errors.Is(err, strconv.ErrRange) {
 		return nil, fmt.Errorf("string-encoded number %q is not a valid number", value)
 	}

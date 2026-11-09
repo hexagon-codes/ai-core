@@ -13,7 +13,7 @@ func TestStringEncodedFloatBoundsKeepGoSyntax(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, text := range []string{"01.5", "+1.5", "1.5", "1.5e0"} {
+	for _, text := range []string{"01.5", "1.5", "1.5e0"} {
 		t.Run(text, func(t *testing.T) {
 			raw, err := json.Marshal(map[string]string{"n": text})
 			if err != nil {
@@ -28,7 +28,7 @@ func TestStringEncodedFloatBoundsKeepGoSyntax(t *testing.T) {
 			}
 		})
 	}
-	for _, raw := range []string{`{"n":"+2.5"}`, `{"n":"00.5"}`, `{"n":"not-a-number"}`} {
+	for _, raw := range []string{`{"n":"+1.5"}`, `{"n":"00.5"}`, `{"n":"not-a-number"}`} {
 		if validator.ValidateJSON([]byte(raw)) == nil {
 			t.Fatalf("out-of-range or invalid value accepted: %s", raw)
 		}
