@@ -44,6 +44,10 @@ const (
 	// 大 system prompt（真机取证 ~7.9k token @ 23 tok/s ≈ 344s）每次都要冷 prefill。
 	// 请求级 keep_alive 每次刷新驻留窗口，让模型与 KV 缓存跨对话间隙存活。
 	defaultKeepAlive = "30m"
+
+	// defaultModelsDiscoveryTimeout 限制 Models() 的模型目录探测；该方法没有
+	// context 参数，但调用方可能在聊天/图片附件热路径同步调用，不能无限等待。
+	defaultModelsDiscoveryTimeout = 10 * time.Second
 )
 
 // Provider 实现 Ollama LLM 提供者
@@ -68,6 +72,8 @@ type Provider struct {
 	// (并发 Complete + Models 曾构成 data race,BUG-20260710 F5)。
 	modelsMu sync.RWMutex
 	models   []llm.ModelInfo // 缓存的模型列表
+	// modelsTimeout 限制 Models() 无 context 签名下的目录探测时长。
+	modelsTimeout time.Duration
 }
 
 // Option 是 Provider 的配置选项
@@ -99,6 +105,16 @@ func WithHTTPClient(client *http.Client) Option {
 	return func(p *Provider) {
 		p.httpClient = client
 		p.streamHTTPClient = client
+	}
+}
+
+// WithModelsTimeout 设置 Models() 模型目录探测的总超时。
+// Models() 没有 context 参数，但可能被上层同步调用；非正值使用默认 10s。
+func WithModelsTimeout(timeout time.Duration) Option {
+	return func(p *Provider) {
+		if timeout > 0 {
+			p.modelsTimeout = timeout
+		}
 	}
 }
 
@@ -166,6 +182,7 @@ func New(opts ...Option) *Provider {
 		httpClient:       httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(ollamaDefaultResponseHeaderWait)),
 		streamHTTPClient: httpx.MustNewRawClient(httpx.WithResponseHeaderTimeout(ollamaStreamResponseHeaderWait)),
 		policy:           &defaultPolicy,
+		modelsTimeout:    defaultModelsDiscoveryTimeout,
 	}
 
 	// 从环境变量读取
@@ -237,6 +254,7 @@ func (p *Provider) Complete(ctx context.Context, req llm.CompletionRequest) (*ll
 	reservation.finish(true)
 
 	parsed := p.parseResponse(&result, req.Model)
+	parsed.RequestID = llm.RequestIDFromHeader(resp.Header)
 	if explicitReasoning {
 		receipt := reasoningPlan.Receipt.WithEvidence(true, result.Message.Thinking != "", 0)
 		parsed.ReasoningReceipt = &receipt
@@ -294,9 +312,11 @@ func (p *Provider) Stream(ctx context.Context, req llm.CompletionRequest) (*stre
 		resp.Body = &numCtxReservationReadCloser{ReadCloser: resp.Body, reservation: reservation}
 	}
 
-	return streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(
+	stream := streamx.NewStreamWithContext(ctx, resp.Body, streamx.CustomFormat).SetParser(
 		streamx.NewTerminalValidatingParser(parser),
-	), nil
+	)
+	stream.SetRequestID(llm.RequestIDFromHeader(resp.Header))
+	return stream, nil
 }
 
 // Models 返回可用模型列表
@@ -310,7 +330,9 @@ func (p *Provider) Models() []llm.ModelInfo {
 	}
 
 	// 尝试从 Ollama 获取本地模型列表（网络请求在锁外，避免持锁阻塞）
-	models, err := p.fetchLocalModels()
+	ctx, cancel := context.WithTimeout(context.Background(), p.modelsTimeout)
+	defer cancel()
+	models, err := p.fetchLocalModels(ctx)
 	if err == nil && len(models) > 0 {
 		p.modelsMu.Lock()
 		p.models = models
@@ -400,8 +422,8 @@ func cloneModelInfos(models []llm.ModelInfo) []llm.ModelInfo {
 }
 
 // fetchLocalModels 从 Ollama 获取本地模型列表
-func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
-	resp, err := p.doRequest(context.Background(), http.MethodGet, p.baseURL+"/api/tags", nil, false)
+func (p *Provider) fetchLocalModels(ctx context.Context) ([]llm.ModelInfo, error) {
+	resp, err := p.doRequest(ctx, http.MethodGet, p.baseURL+"/api/tags", nil, false)
 	if err != nil {
 		return nil, err
 	}
@@ -441,7 +463,7 @@ func (p *Provider) fetchLocalModels() ([]llm.ModelInfo, error) {
 		maxTokens := m.Details.ContextLength
 		capabilities := m.Capabilities
 		if len(capabilities) == 0 || maxTokens <= 0 {
-			if showDetails, err := p.fetchModelDetails(context.Background(), modelID); err == nil {
+			if showDetails, err := p.fetchModelDetails(ctx, modelID); err == nil {
 				if len(capabilities) == 0 {
 					capabilities = showDetails.capabilities
 				}
@@ -1311,6 +1333,7 @@ func (p *Provider) parseResponse(resp *ollamaResponse, model string) *llm.Comple
 			TotalTokens:      resp.PromptEvalCount + resp.EvalCount,
 		},
 	}
+	result.UsageReceipt = llm.UsageReceiptFromUsage(result.Usage)
 
 	if resp.Done {
 		result.FinishReason = "stop"

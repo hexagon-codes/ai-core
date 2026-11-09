@@ -459,7 +459,7 @@ func TestModels_FallsBackToShowCapabilities(t *testing.T) {
 
 func TestFetchLocalModels_Errors(t *testing.T) {
 	// 不可达 → error（经 Models fallback，但直接调也覆盖 error 分支）
-	if _, err := New(WithBaseURL("http://127.0.0.1:1")).fetchLocalModels(); err == nil {
+	if _, err := New(WithBaseURL("http://127.0.0.1:1")).fetchLocalModels(context.Background()); err == nil {
 		t.Error("不可达应报错")
 	}
 	// 畸形 JSON
@@ -467,7 +467,7 @@ func TestFetchLocalModels_Errors(t *testing.T) {
 		_, _ = w.Write([]byte(`{bad`))
 	}))
 	defer mal.Close()
-	if _, err := New(WithBaseURL(mal.URL)).fetchLocalModels(); err == nil {
+	if _, err := New(WithBaseURL(mal.URL)).fetchLocalModels(context.Background()); err == nil {
 		t.Error("畸形 JSON 应报错")
 	}
 }
