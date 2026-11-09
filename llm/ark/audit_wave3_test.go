@@ -617,7 +617,7 @@ func TestComplete_NilContext(t *testing.T) {
 		// nil context 触发底层 panic 属于已知 Go 行为；这里仅确认不会静默错误地继续执行。
 		_ = recover()
 	}()
-	//nolint:staticcheck // 故意传 nil context 测试边界
+	//lint:ignore SA1012 故意传 nil context 验证边界行为
 	_, _ = p.Complete(nil, llm.CompletionRequest{Messages: []llm.Message{llm.UserMessage("a")}})
 }
 

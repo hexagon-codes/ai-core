@@ -148,9 +148,6 @@ func TestStringEncodedNumericBoundsRejectInvalidValues(t *testing.T) {
 }
 
 func TestStandardStringSchemasKeepNumericMinimumAsAnnotation(t *testing.T) {
-	type tagged struct {
-		N int64 `json:"n,string" min:"10" max:"20" required:"true"`
-	}
 	if !hasNumericStringMarker(map[string]any{
 		"type":               "string",
 		"minimum":            json.Number("10"),

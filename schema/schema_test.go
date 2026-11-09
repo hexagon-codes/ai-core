@@ -161,6 +161,8 @@ func TestOf_IgnoreUnexported(t *testing.T) {
 		Public  string `json:"public"`
 		private string
 	}
+	// 构造包含未导出字段的值，确保 fixture 自身被使用；Of 仍应忽略该字段。
+	_ = MixedStruct{Public: "visible", private: "hidden"}
 
 	schema := Of[MixedStruct]()
 
