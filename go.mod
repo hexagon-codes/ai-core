@@ -4,7 +4,7 @@ go 1.26.10
 
 require (
 	github.com/coder/websocket v1.8.15
-	github.com/hexagon-codes/toolkit v0.3.7
+	github.com/hexagon-codes/toolkit v0.3.8
 	github.com/openai/openai-go/v3 v3.91.0
 	github.com/santhosh-tekuri/jsonschema/v6 v6.0.3
 	golang.org/x/text v0.42.0
