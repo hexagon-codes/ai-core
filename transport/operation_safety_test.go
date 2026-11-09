@@ -3,10 +3,15 @@ package transport
 import (
 	"context"
 	"errors"
+	"io"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"sync/atomic"
+	"syscall"
 	"testing"
+	"time"
 )
 
 type operationSafetyRoundTripperFunc func(*http.Request) (*http.Response, error)
@@ -15,11 +20,9 @@ func (f operationSafetyRoundTripperFunc) RoundTrip(req *http.Request) (*http.Res
 	return f(req)
 }
 
-type operationSafetyTemporaryError struct{}
-
-func (operationSafetyTemporaryError) Error() string   { return "connection reset by peer" }
-func (operationSafetyTemporaryError) Timeout() bool   { return false }
-func (operationSafetyTemporaryError) Temporary() bool { return true }
+func connectionResetError() error {
+	return &net.OpError{Op: "read", Net: "tcp", Err: syscall.ECONNRESET}
+}
 
 type operationSafetyTimeoutError struct{}
 
@@ -35,7 +38,7 @@ func TestDoNonIdempotentNetworkFailureIsNotReplayed(t *testing.T) {
 				t.Fatalf("method = %s, want POST", req.Method)
 			}
 			calls.Add(1)
-			return nil, operationSafetyTemporaryError{}
+			return nil, connectionResetError()
 		},
 	)}
 	ctx := WithOperationSafety(context.Background(), OperationSafetyNonIdempotent)
@@ -53,6 +56,39 @@ func TestDoNonIdempotentNetworkFailureIsNotReplayed(t *testing.T) {
 	}
 	if calls.Load() != 1 {
 		t.Fatalf("physical POST attempts = %d, want 1", calls.Load())
+	}
+}
+
+func TestDoRetriesIdempotentConnectionReset(t *testing.T) {
+	var calls atomic.Int32
+	client := &http.Client{Transport: operationSafetyRoundTripperFunc(
+		func(req *http.Request) (*http.Response, error) {
+			if calls.Add(1) == 1 {
+				return nil, connectionResetError()
+			}
+			return &http.Response{
+				StatusCode: http.StatusOK,
+				Header:     make(http.Header),
+				Body:       io.NopCloser(strings.NewReader(`{}`)),
+				Request:    req,
+			}, nil
+		},
+	)}
+
+	resp, err := Do(context.Background(), Request{
+		Provider: "test",
+		Action:   "list",
+		Method:   http.MethodGet,
+		URL:      "https://example.test/v1/models",
+		Client:   client,
+		Retry:    RetryPolicy{MaxAttempts: 2, BaseDelay: time.Millisecond},
+	})
+	if err != nil {
+		t.Fatalf("Do() error = %v", err)
+	}
+	defer resp.Body.Close()
+	if calls.Load() != 2 {
+		t.Fatalf("attempts = %d, want 2 for idempotent connection reset", calls.Load())
 	}
 }
 

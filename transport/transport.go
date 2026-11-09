@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 )
 
@@ -361,9 +362,14 @@ func shouldRetryNetworkError(ctx context.Context, err error, policy RetryPolicy)
 	if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) || errors.Is(err, ErrNetworkPolicy) {
 		return false
 	}
+	// net.Error.Temporary 自 Go 1.18 起弃用且语义不明确；改用明确的
+	// 连接重置/拒绝/管道断开判断，超时继续由 Timeout 覆盖。
+	if errors.Is(err, syscall.ECONNRESET) || errors.Is(err, syscall.ECONNREFUSED) || errors.Is(err, syscall.EPIPE) {
+		return true
+	}
 	var netErr net.Error
 	if errors.As(err, &netErr) {
-		return netErr.Timeout() || netErr.Temporary()
+		return netErr.Timeout()
 	}
 	return true
 }
@@ -688,9 +694,12 @@ func ClientWithNetworkPolicy(client *http.Client, policy *NetworkPolicy) (*http.
 			return conn, nil
 		}
 	}
-	if guarded.DialTLS != nil {
-		dialTLS := guarded.DialTLS
-		guarded.DialTLS = func(network, addr string) (net.Conn, error) {
+	//lint:ignore SA1019 保留旧 DialTLS 字段的兼容包装；Go 未提供非弃用的读取方式
+	if guarded.DialTLS != nil { //nolint:staticcheck // 兼容旧字段
+		//lint:ignore SA1019 同上，兼容只配置了 DialTLS 的自定义 Transport
+		dialTLS := guarded.DialTLS //nolint:staticcheck // 兼容旧字段
+		//lint:ignore SA1019 同上，仅包装旧字段以保持既有行为
+		guarded.DialTLS = func(network, addr string) (net.Conn, error) { //nolint:staticcheck // 兼容旧字段
 			conn, err := dialTLS(network, addr)
 			if err != nil {
 				return nil, err
